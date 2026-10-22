@@ -876,7 +876,7 @@ public class ProofTask {
                 lastVerifiedConsumerCheckpoint.getDuplicatedCount().values().stream().reduce(0L, Long::sum),
                 lastVerifiedConsumerCheckpoint.getWriteDuplicatesSeqs().values().stream()
                         .flatMap(ranges -> ranges.stream()
-                                .map(range -> range.getEnd().seq() - range.getStart().seq() - 1))
+                                .map(range -> range.getEnd().seq() - range.getStart().seq() + 1))
                         .mapToInt(Long::intValue)
                         .sum(),
                 this.getTimeouts(),
