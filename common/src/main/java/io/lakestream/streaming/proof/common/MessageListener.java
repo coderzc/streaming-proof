@@ -71,4 +71,16 @@ public interface MessageListener {
      * @see io.lakestream.streaming.proof.worker.DefaultMessageListener
      */
     void onMessage(String key, long value, MessageMetadata metadata);
+
+    /** Deliver protocol ordering evidence while retaining compatibility with existing listeners. */
+    default void onMessage(String key, long value, MessageMetadata metadata, DeliveryContext context) {
+        onMessage(key, value, metadata);
+    }
+
+    /** Start a new partition assignment/read epoch; a lower recovery offset is legal here. */
+    default void onPartitionAssigned(int partition) { }
+
+    /** Revoke only this partition; cooperative rebalances can retain other assignments. */
+    default void onPartitionRevoked(int partition) { }
+
 }

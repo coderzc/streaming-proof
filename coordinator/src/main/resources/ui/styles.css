@@ -1444,3 +1444,12 @@ svg {
     scroll-behavior: auto !important;
   }
 }
+
+/* Missing ordering evidence must remain visually distinct from a pass. */
+.status-badge.inconclusive {
+  background: #fff3cd;
+  color: #856404;
+}
+.proof-item.status-inconclusive .status-indicator {
+  background: #d99b00;
+}

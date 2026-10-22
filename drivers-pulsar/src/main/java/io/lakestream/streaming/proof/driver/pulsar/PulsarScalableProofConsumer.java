@@ -13,6 +13,7 @@
  */
 package io.lakestream.streaming.proof.driver.pulsar;
 
+import io.lakestream.streaming.proof.common.DeliveryContext;
 import io.lakestream.streaming.proof.common.MessageListener;
 import io.lakestream.streaming.proof.common.ProofConsumer;
 import io.lakestream.streaming.proof.common.ProofValue;
@@ -52,6 +53,7 @@ public class PulsarScalableProofConsumer implements ProofConsumer {
     private final long consumeDelayMs;
     private final AtomicBoolean closing = new AtomicBoolean(false);
     private final Thread consumerThread;
+    private final boolean checkpointMode;
 
     /** The underlying V5 consumer and how to receive and acknowledge with it */
     private final AutoCloseable consumer;
@@ -64,6 +66,7 @@ public class PulsarScalableProofConsumer implements ProofConsumer {
         this.name = name;
         this.messageListener = listener;
         this.consumeDelayMs = consumeDelayMs;
+        this.checkpointMode = "checkpoint".equals(consumerType);
         switch (consumerType) {
             case "queue" -> {
                 QueueConsumer<byte[]> queue = client.newQueueConsumer(Schema.bytes())
@@ -127,7 +130,10 @@ public class PulsarScalableProofConsumer implements ProofConsumer {
                     Thread.sleep(delayMs);
                 }
                 messageListener.onMessage(message.key().orElse(null), ProofValue.decode(message.value()).seq(),
-                        PulsarScalableMessageIds.toMetadata(message.id(), publishTime));
+                        PulsarScalableMessageIds.toMetadata(message.id(), publishTime),
+                        checkpointMode ? DeliveryContext.checkpoint()
+                                : DeliveryContext.pulsar(
+                                        message.redeliveryCount() > 0));
                 acknowledger.accept(message.id());
             } catch (InterruptedException e) {
                 return; // closing: the unprocessed message stays unacknowledged and is redelivered

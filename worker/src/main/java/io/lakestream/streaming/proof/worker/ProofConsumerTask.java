@@ -13,6 +13,8 @@
  */
 package io.lakestream.streaming.proof.worker;
 
+import io.lakestream.streaming.proof.common.DeliveryContext;
+import io.lakestream.streaming.proof.common.DeliveryOrderTracker;
 import io.lakestream.streaming.proof.common.LongSeq;
 import io.lakestream.streaming.proof.common.MessageListener;
 import io.lakestream.streaming.proof.common.MessageMetadata;
@@ -59,8 +61,46 @@ public class ProofConsumerTask implements MessageListener, AutoCloseable {
     }
 
     public ProofConsumerTask(boolean sharedMode, int messageSize) {
+        this(sharedMode, messageSize, false, false);
+    }
+
+    public ProofConsumerTask(boolean sharedMode, int messageSize, boolean orderingEnabled,
+            boolean unobservedHandoffs) {
         this.sharedMode = sharedMode;
         this.messageSize = messageSize;
+        this.orderTracker = orderingEnabled && !sharedMode ? new DeliveryOrderTracker() : null;
+        this.unobservedHandoffs = unobservedHandoffs;
+    }
+
+    private final DeliveryOrderTracker orderTracker;
+    private final boolean unobservedHandoffs;
+    private final String orderingIdentity = java.util.UUID.randomUUID().toString();
+
+    public void addOrderingEvidence(ConsumerCheckPoint checkpoint) {
+        if (orderTracker == null) {
+            return;
+        }
+        checkpoint.addOrderingViolations(orderTracker.violations());
+        java.util.Set<String> gaps = new java.util.HashSet<>(orderTracker.gaps());
+        if (unobservedHandoffs) {
+            gaps.add("Pulsar cross-consumer ownership/handoff order is not instrumented");
+        }
+        checkpoint.addOrderingEvidence(orderingIdentity,
+                new ConsumerCheckPoint.OrderingEvidence(orderTracker.observations(), java.util.Set.copyOf(gaps)));
+    }
+
+    @Override
+    public synchronized void onPartitionAssigned(int partition) {
+        if (orderTracker != null) {
+            orderTracker.assigned(partition);
+        }
+    }
+
+    @Override
+    public synchronized void onPartitionRevoked(int partition) {
+        if (orderTracker != null) {
+            orderTracker.revoked(partition);
+        }
     }
 
     /** Total size in bytes of each message value, used for throughput accounting */
@@ -106,6 +146,21 @@ public class ProofConsumerTask implements MessageListener, AutoCloseable {
      */
     @Override
     public synchronized void onMessage(String key, long value, MessageMetadata metadata) {
+        if (orderTracker != null) {
+            orderTracker.observe(key, value, metadata, null);
+        }
+        processMessage(key, value, metadata);
+    }
+
+    @Override
+    public synchronized void onMessage(String key, long value, MessageMetadata metadata, DeliveryContext context) {
+        if (orderTracker != null) {
+            orderTracker.observe(key, value, metadata, context);
+        }
+        processMessage(key, value, metadata);
+    }
+
+    private void processMessage(String key, long value, MessageMetadata metadata) {
         receivedMessages.incrementAndGet();
         receivedBytes.addAndGet(estimateMessageBytes(key));
         if (metadata != null && metadata.publishTimestampMillis() != null && metadata.publishTimestampMillis() > 0) {

@@ -36,6 +36,29 @@ public class KafkaAtLeastOnceProofConsumerTest {
         MockitoAnnotations.openMocks(this);
     }
     
+    @Test(timeOut = 10000)
+    public void passesPartitionPositionAndProtocolContextToTheVerifier() throws Exception {
+        var partition = new org.apache.kafka.common.TopicPartition("topic", 2);
+        var record = new org.apache.kafka.clients.consumer.ConsumerRecord<>(
+                "topic", 2, 100L, "key", ProofValue.of(1L));
+        var records = new org.apache.kafka.clients.consumer.ConsumerRecords<>(Map.of(partition, java.util.List.of(record)));
+        Mockito.when(mockConsumer.poll(Mockito.any(java.time.Duration.class)))
+                .thenReturn(records).thenAnswer(invocation -> {
+                    new java.util.concurrent.CountDownLatch(1).await();
+                    return null;
+                });
+        KafkaAtLeastOnceProofConsumer consumer = new KafkaAtLeastOnceProofConsumer(
+                "consumer", mockConsumer, Map.of(), 0, messageListener);
+        try {
+            Mockito.verify(messageListener, Mockito.timeout(3000)).onMessage(
+                    Mockito.eq("key"), Mockito.eq(1L),
+                    Mockito.argThat(metadata -> metadata.partition() == 2 && metadata.offset() == 100),
+                    Mockito.eq(io.lakestream.streaming.proof.common.DeliveryContext.kafka()));
+        } finally {
+            consumer.close();
+        }
+    }
+
     @Test
     public void testClose() throws Exception {
         // Arrange

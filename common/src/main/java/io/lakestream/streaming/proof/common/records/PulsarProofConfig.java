@@ -67,6 +67,13 @@ public class PulsarProofConfig {
         return isSharedMode(consumerConfig, consumerType);
     }
 
+    /** Determine ordering from the effective driver config after per-proof overrides. */
+    public static boolean isSharedDriverConfig(Map<String, Object> configs) {
+        Object raw = configs.get("pulsar.consumer.config");
+        return "queue".equals(configs.get("pulsar.consumer.type"))
+                || raw instanceof Map<?, ?> map && "Shared".equals(String.valueOf(map.get("subscriptionType")));
+    }
+
     /** Same as {@link #isSharedMode()}, for callers that only have the two settings. */
     public static boolean isSharedMode(Map<String, Object> consumerConfig, String consumerType) {
         return "queue".equals(consumerType)

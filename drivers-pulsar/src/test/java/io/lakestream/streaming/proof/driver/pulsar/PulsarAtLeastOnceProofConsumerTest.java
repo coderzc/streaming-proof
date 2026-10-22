@@ -40,6 +40,42 @@ import org.testng.annotations.Test;
 
 public class PulsarAtLeastOnceProofConsumerTest {
 
+    @Test(timeOut = 10000)
+    @SuppressWarnings("unchecked")
+    public void deliversPartitionPositionAndRedeliveryEvidenceToTheVerifier() throws Exception {
+        PulsarClient client = mock(PulsarClient.class);
+        ConsumerBuilder<ProofValue> builder = mock(ConsumerBuilder.class, RETURNS_SELF);
+        Consumer<ProofValue> delegate = mock(Consumer.class);
+        Message<ProofValue> message = mock(Message.class);
+        MessageIdAdv id = mock(MessageIdAdv.class);
+        MessageListener listener = mock(MessageListener.class);
+        when(client.newConsumer(any(ProofValueSchema.class))).thenReturn(builder);
+        when(builder.subscribe()).thenReturn(delegate);
+        when(delegate.receive()).thenReturn(message).thenAnswer(invocation -> {
+            new java.util.concurrent.CountDownLatch(1).await();
+            return null;
+        });
+        when(message.getKey()).thenReturn("key");
+        when(message.getValue()).thenReturn(ProofValue.of(1L));
+        when(message.getMessageId()).thenReturn(id);
+        when(message.getRedeliveryCount()).thenReturn(1);
+        when(id.getLedgerId()).thenReturn(2L);
+        when(id.getEntryId()).thenReturn(3L);
+        when(id.getPartitionIndex()).thenReturn(4);
+        PulsarAtLeastOnceProofConsumer consumer = new PulsarAtLeastOnceProofConsumer(
+                "consumer", client, "topic", Map.of(), 0, listener, mock(PulsarAdmin.class));
+        try {
+            verify(listener, org.mockito.Mockito.timeout(3000)).onMessage(
+                    org.mockito.ArgumentMatchers.eq("key"), org.mockito.ArgumentMatchers.eq(1L),
+                    org.mockito.ArgumentMatchers.argThat(metadata -> metadata.partition() == 4
+                            && metadata.ledgerId() == 2 && metadata.entryId() == 3),
+                    org.mockito.ArgumentMatchers.eq(
+                            io.lakestream.streaming.proof.common.DeliveryContext.pulsarPartition(true)));
+        } finally {
+            consumer.close();
+        }
+    }
+
     @DataProvider
     public Object[][] offloadWaitConfigs() {
         return new Object[][]{
@@ -93,6 +129,7 @@ public class PulsarAtLeastOnceProofConsumerTest {
         }
 
         verify(listener, never()).onMessage(anyString(), anyLong(), any());
+        verify(listener, never()).onMessage(anyString(), anyLong(), any(), any());
         verify(pulsarConsumer, never()).acknowledge(any(Message.class));
         verify(pulsarConsumer, never()).negativeAcknowledge(any(Message.class));
         verify(pulsarConsumer).close();

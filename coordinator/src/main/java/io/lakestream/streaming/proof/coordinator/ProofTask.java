@@ -148,6 +148,16 @@ public class ProofTask {
     @Setter(AccessLevel.PACKAGE)
     private ConsumerCheckPoint latestConsumerCheckpoint = new ConsumerCheckPoint();
 
+    /** Cumulative order evidence is independent of successful delivery watermark advancement. */
+    private final ConsumerCheckPoint orderingCheckpoint = new ConsumerCheckPoint();
+    private volatile boolean orderingCollectionIncomplete;
+
+    private ConsumerCheckPoint orderingSnapshot() {
+        orderingCheckpoint.mergeOrderingEvidence(lastVerifiedConsumerCheckpoint);
+        orderingCheckpoint.mergeOrderingEvidence(latestConsumerCheckpoint);
+        return orderingCheckpoint;
+    }
+
     /** Last failed producer checkpoint */
     private ProducerCheckpoint lastFailedProducerCheckpoint = new ProducerCheckpoint();
 
@@ -218,13 +228,27 @@ public class ProofTask {
         this.topicDriverCache = new DriverCache();
         this.topicDriverResolver = topicDriverResolver;
         this.webhookService = new WebhookNotificationService();
-        this.sharedMode = proof.getPulsar() != null
-                && proof.getPulsar().isSharedMode();
+        this.sharedMode = effectiveSharedMode(proof, configs);
         applyTopicDefaults();
         configs.workers().forEach((k, v) -> {
             WorkerHttpClient client = new WorkerHttpClient(Dsl.asyncHttpClient(), v);
             clients.add(client);
         });
+    }
+
+    private static boolean effectiveSharedMode(Proof proof, Configs configs) {
+        String name = proof.getDrivers() == null ? proof.getDriver() : proof.getDrivers().consumer();
+        var driver = name == null ? null : configs.drivers().get(name);
+        Map<String, Object> effective = new HashMap<>(driver == null ? Map.of() : driver.driverConfigs());
+        if (proof.getPulsar() != null) {
+            if (proof.getPulsar().getConsumerConfig() != null) {
+                effective.put("pulsar.consumer.config", proof.getPulsar().getConsumerConfig());
+            }
+            if (proof.getPulsar().getConsumerType() != null) {
+                effective.put("pulsar.consumer.type", proof.getPulsar().getConsumerType());
+            }
+        }
+        return io.lakestream.streaming.proof.common.records.PulsarProofConfig.isSharedDriverConfig(effective);
     }
 
     /**
@@ -477,7 +501,9 @@ public class ProofTask {
                     driverName,
                     configs.drivers().get(driverName),
                     pulsarConsumerConfig,
-                    pulsarConsumerType
+                    pulsarConsumerType,
+                    proof.getFeatures().contains("ordering") && !sharedMode,
+                    proof.getConsumers()
             );
             try {
                 clients.get(i).startConsumers(record).join();
@@ -565,6 +591,7 @@ public class ProofTask {
                 Pair<ProducerCheckpoint, ConsumerCheckPoint> checkpoints = aggregateCheckpoints();
                 ProofTask.this.latestProducerCheckpoint = checkpoints.getLeft();
                 ProofTask.this.latestConsumerCheckpoint = checkpoints.getRight();
+                orderingSnapshot();
                 if (ProofTask.this.inCheck == null) {
                     ProofTask.this.inCheck = ProofTask.this.latestProducerCheckpoint;
                     ProofTask.this.checkPointInCheckTimeStamps = System.currentTimeMillis();
@@ -700,6 +727,7 @@ public class ProofTask {
                 Pair<ProducerCheckpoint, ConsumerCheckPoint> checkpoints = aggregateCheckpoints();
                 latestProducerCheckpoint = checkpoints.getLeft();
                 latestConsumerCheckpoint = checkpoints.getRight();
+                orderingSnapshot();
                 inCheck = latestProducerCheckpoint;
 
                 boolean fulfilled;
@@ -772,9 +800,12 @@ public class ProofTask {
                         highWatermarks).join();
                 aggregatedConsumerCheckpoint.merge(consumerCheckpoint);
             } catch (Exception e) {
+                orderingCollectionIncomplete = true;
                 throw new RuntimeException(e);
             }
         }
+        orderingCollectionIncomplete = proof.getFeatures().contains("ordering") && !sharedMode
+                && aggregatedConsumerCheckpoint.getOrderingEvidence().size() != proof.getConsumers();
         return Pair.of(aggregatedProducerCheckpoint, aggregatedConsumerCheckpoint);
     }
 
@@ -863,7 +894,7 @@ public class ProofTask {
         return new ProofSummary(
                 verified,
                 countProducerErrors(this.getLastVerifiedProducerCheckpoint()),
-                lastVerifiedConsumerCheckpoint.getOutOfOrderSeqs().values().stream()
+                orderingSnapshot().getOutOfOrderSeqs().values().stream()
                         .flatMap(ranges -> ranges.stream()
                                 .map(range -> range.getRight() - range.getLeft() + 1))
                         .mapToInt(Long::intValue)
@@ -994,7 +1025,7 @@ public class ProofTask {
                         countProducerKeys(lastFailedProducerCheckpoint),
                         countConsumerKeys(lastFailedConsumerCheckpoint)),
                 performanceSummary,
-                List.copyOf(reportTimeSeries));
+                List.copyOf(reportTimeSeries), orderingSummary(summary));
     }
 
     private List<ProofClusterTarget> resolveClusterTargets() {
@@ -1158,7 +1189,57 @@ public class ProofTask {
                 && summary.maxVerifiedStallSeconds() > proof.getMaxStallSeconds()) {
             return "failed";
         }
+        if (hasIncompleteOrderingEvidence()) {
+            return "inconclusive";
+        }
         return "passed";
+    }
+
+    private io.lakestream.streaming.proof.common.records.ProofOrderingSummary orderingSummary(ProofSummary summary) {
+        String scope = "Consumer-local protocol delivery order; Kafka partition assignment epochs "
+                + "or Pulsar partitions/keys. "
+                + "Does not assert producer business-sequence or concurrent application completion order.";
+        java.util.Set<String> gaps = orderingLimitations();
+        var evidence = orderingSnapshot().getOrderingEvidence();
+        long observations = evidence.values().stream()
+                .mapToLong(ConsumerCheckPoint.OrderingEvidence::observations).sum();
+        String status;
+        if (sharedMode) {
+            status = "not_applicable";
+        } else if (!proof.getFeatures().contains("ordering")) {
+            status = "not_requested";
+        } else if (summary.outOfOrders() > 0) {
+            status = "failed";
+        } else if (hasIncompleteOrderingEvidence()) {
+            status = "incomplete";
+        } else {
+            status = "verified_within_scope";
+        }
+        return new io.lakestream.streaming.proof.common.records.ProofOrderingSummary(
+                status, scope, observations, evidence.size(), java.util.Set.copyOf(gaps));
+    }
+
+    private java.util.Set<String> orderingLimitations() {
+        java.util.Set<String> gaps = new java.util.TreeSet<>();
+        if (!proof.getFeatures().contains("ordering") || sharedMode) {
+            return gaps;
+        }
+        var evidence = orderingSnapshot().getOrderingEvidence();
+        evidence.values().forEach(e -> gaps.addAll(e.gaps()));
+        if (evidence.size() != proof.getConsumers()) {
+            gaps.add("Consumer checker identities are missing or changed during the run");
+        }
+        if (evidence.values().stream().mapToLong(ConsumerCheckPoint.OrderingEvidence::observations).sum() == 0) {
+            gaps.add("No protocol ordering observations were reported");
+        }
+        if (orderingCollectionIncomplete) {
+            gaps.add("The latest worker checkpoint collection did not complete");
+        }
+        return gaps;
+    }
+
+    private boolean hasIncompleteOrderingEvidence() {
+        return !orderingLimitations().isEmpty();
     }
 
     private String determineResultReason(
@@ -1185,6 +1266,10 @@ public class ProofTask {
                 && summary.maxVerifiedStallSeconds() > proof.getMaxStallSeconds()) {
             return "Verification stalled for " + summary.maxVerifiedStallSeconds()
                     + "s, exceeding the configured limit of " + proof.getMaxStallSeconds() + "s.";
+        }
+        if ("inconclusive".equals(resultStatus)) {
+            java.util.Set<String> gaps = orderingLimitations();
+            return "Delivery checks completed, but ordering evidence is incomplete: " + String.join("; ", gaps);
         }
         if ("passed".equals(resultStatus)) {
             return "The run completed without missed or out-of-order messages.";

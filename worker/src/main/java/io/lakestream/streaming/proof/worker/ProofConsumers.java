@@ -83,10 +83,11 @@ public class ProofConsumers {
         if (newConsumers.pulsarConsumerType() != null) {
             configs.put("pulsar.consumer.type", newConsumers.pulsarConsumerType());
         }
-        boolean sharedMode = PulsarProofConfig.isSharedMode(
-                newConsumers.pulsarConsumerConfig(), newConsumers.pulsarConsumerType());
+        boolean sharedMode = PulsarProofConfig.isSharedDriverConfig(configs);
         for (int i = 0; i < newConsumers.consumers(); i++) {
-            ProofConsumerTask task = new ProofConsumerTask(sharedMode, newConsumers.messageSize());
+            ProofConsumerTask task = new ProofConsumerTask(sharedMode, newConsumers.messageSize(),
+                    newConsumers.orderingEnabled(), newConsumers.totalConsumers() > 1
+                    && "pulsar".equals(newConsumers.driver().driverType()));
             ProofConsumer proofConsumer = driver.createConsumer(newConsumers.topic(), newConsumers.partitions(),
                     newConsumers.consumeDelayMs(), configs, task);
             task.setConsumer(proofConsumer);
@@ -104,6 +105,7 @@ public class ProofConsumers {
         for (ProofConsumerTask task : tasks) {
             task.getTrimmedConsumed().forEach(checkpoint::addKey);
             task.getWriteDupsOrOutOrder().forEach(checkpoint::addWriteDupsOrOutOrder);
+            task.addOrderingEvidence(checkpoint);
         }
         return checkpoint;
     }
@@ -121,6 +123,7 @@ public class ProofConsumers {
             ConsumerCheckPoint checkPoint = new ConsumerCheckPoint();
             task.getTrimmedConsumed().forEach(checkPoint::addKey);
             task.getWriteDupsOrOutOrder().forEach(checkPoint::addWriteDupsOrOutOrder);
+            task.addOrderingEvidence(checkPoint);
             result.put(task.getConsumerName(), checkPoint);
         }
         return result;

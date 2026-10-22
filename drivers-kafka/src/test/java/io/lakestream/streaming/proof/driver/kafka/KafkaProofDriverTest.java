@@ -54,6 +54,19 @@ public class KafkaProofDriverTest {
         assertEquals(topic.configs(), topicConfig);
     }
 
+    @Test
+    public void rebalanceAdapterForwardsAssignmentsRevocationsAndLostPartitions() {
+        io.lakestream.streaming.proof.common.MessageListener listener =
+                mock(io.lakestream.streaming.proof.common.MessageListener.class);
+        var events = KafkaProofDriver.partitionEvents(listener, "consumer");
+        var partition = new org.apache.kafka.common.TopicPartition("topic", 2);
+        events.onPartitionsAssigned(java.util.List.of(partition));
+        events.onPartitionsRevoked(java.util.List.of(partition));
+        events.onPartitionsLost(java.util.List.of(partition));
+        verify(listener).onPartitionAssigned(2);
+        verify(listener, org.mockito.Mockito.times(2)).onPartitionRevoked(2);
+    }
+
     private static void setAdmin(KafkaProofDriver driver, AdminClient admin) throws Exception {
         Field adminField = KafkaProofDriver.class.getDeclaredField("admin");
         adminField.setAccessible(true);

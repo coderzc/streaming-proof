@@ -13,6 +13,7 @@
  */
 package io.lakestream.streaming.proof.driver.pulsar;
 
+import io.lakestream.streaming.proof.common.DeliveryContext;
 import io.lakestream.streaming.proof.common.MessageListener;
 import io.lakestream.streaming.proof.common.MessageMetadata;
 import io.lakestream.streaming.proof.common.ProofConsumer;
@@ -67,6 +68,7 @@ public class PulsarAtLeastOnceProofConsumer implements ProofConsumer {
     private final MessageListener messageListener;
 
     private final long consumeDelayMs;
+    private final boolean partitionOrdered;
 
     private final Optional<OffloadCondition> offloadCondition;
 
@@ -92,6 +94,10 @@ public class PulsarAtLeastOnceProofConsumer implements ProofConsumer {
         this.name = name;
         this.messageListener = listener;
         this.consumeDelayMs = consumeDelayMs;
+        Object consumerConfig = configs.get("pulsar.consumer.config");
+        Object subscriptionType = consumerConfig instanceof Map<?, ?> map ? map.get("subscriptionType") : null;
+        this.partitionOrdered = subscriptionType == null || "Failover".equals(subscriptionType.toString())
+                || "Exclusive".equals(subscriptionType.toString());
         this.offloadCondition = OffloadCondition.getOffloadCondition(admin, topic, configs);
 
         ConsumerBuilder<ProofValue> consumerBuilder = client.newConsumer(new ProofValueSchema())
@@ -144,8 +150,11 @@ public class PulsarAtLeastOnceProofConsumer implements ProofConsumer {
                         int batchIndex = messageIdImpl.getBatchIndex();
 
                         MessageMetadata metadata = new MessageMetadata(
-                                null, ledgerId, entryId, null, -1L, message.getPublishTime(), batchIndex);
-                        messageListener.onMessage(key, value.seq(), metadata);
+                                null, ledgerId, entryId, messageIdImpl.getPartitionIndex(), -1L,
+                                message.getPublishTime(), batchIndex);
+                        messageListener.onMessage(key, value.seq(), metadata,
+                                partitionOrdered ? DeliveryContext.pulsarPartition(message.getRedeliveryCount() > 0)
+                                        : DeliveryContext.pulsar(message.getRedeliveryCount() > 0));
 
                         consumer.acknowledge(message);
 

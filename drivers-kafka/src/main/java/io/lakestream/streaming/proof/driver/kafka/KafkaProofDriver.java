@@ -225,17 +225,27 @@ public class KafkaProofDriver implements ProofDriver {
         log.info("Creating at-least-once consumer for topic: {}", topicName);
         KafkaConsumer<String, ProofValue> consumer = new KafkaConsumer<>(configs);
         String consumerName = RandomStringUtils.secure().nextAlphanumeric(5);
-        consumer.subscribe(List.of(topicName), new ConsumerRebalanceListener() {
+        consumer.subscribe(List.of(topicName), partitionEvents(listener, consumerName));
+        return new KafkaAtLeastOnceProofConsumer(consumerName, consumer, configs, consumeDelayMs, listener);
+    }
+
+    static ConsumerRebalanceListener partitionEvents(MessageListener listener, String consumerName) {
+        return new ConsumerRebalanceListener() {
             @Override
             public void onPartitionsRevoked(Collection<TopicPartition> partitions) {
-                partitions.forEach(p -> log.info("[{}] Kafka partition revoked: {}", consumerName, p));
+                partitions.forEach(p -> {
+                    listener.onPartitionRevoked(p.partition());
+                    log.info("[{}] Kafka partition revoked: {}", consumerName, p);
+                });
             }
             @Override
             public void onPartitionsAssigned(Collection<TopicPartition> partitions) {
-                partitions.forEach(p -> log.info("[{}] Kafka partition assigned: {}", consumerName, p));
+                partitions.forEach(p -> {
+                    listener.onPartitionAssigned(p.partition());
+                    log.info("[{}] Kafka partition assigned: {}", consumerName, p);
+                });
             }
-        });
-        return new KafkaAtLeastOnceProofConsumer(consumerName, consumer, configs, consumeDelayMs, listener);
+        };
     }
 
 

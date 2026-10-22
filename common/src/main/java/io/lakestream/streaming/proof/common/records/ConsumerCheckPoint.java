@@ -19,6 +19,7 @@ import io.lakestream.streaming.proof.common.LongSeq;
 import io.lakestream.streaming.proof.common.Util;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -170,7 +171,38 @@ public class ConsumerCheckPoint {
     /** Map storing the count of duplicated messages for each key */
     private volatile Map<String, Long> duplicatedCount = Collections.emptyMap();
     /** Map storing out-of-order sequence ranges for each key */
+    @JsonIgnore
     private volatile Map<String, List<Pair<Long, Long>>> outOfOrderSeqs = Collections.emptyMap();
+
+    /** Concrete wire representation; abstract Pair values cannot be restored by the JSON mapper. */
+    private Map<String, List<OrderingRange>> orderingViolations = Collections.emptyMap();
+
+    public record OrderingRange(long start, long end) { }
+
+    /** Cumulative per-worker-task coverage, merged by identity rather than summed per snapshot. */
+    private volatile Map<String, OrderingEvidence> orderingEvidence = Map.of();
+
+    public record OrderingEvidence(long observations, java.util.Set<String> gaps) { }
+
+    public synchronized void addOrderingEvidence(String id, OrderingEvidence evidence) {
+        Map<String, OrderingEvidence> merged = new HashMap<>(orderingEvidence);
+        merged.merge(id, evidence, (previous, next) -> {
+            java.util.Set<String> gaps = new java.util.HashSet<>(previous.gaps());
+            gaps.addAll(next.gaps());
+            return new OrderingEvidence(Math.max(previous.observations(), next.observations()),
+                    java.util.Set.copyOf(gaps));
+        });
+        orderingEvidence = Map.copyOf(merged);
+    }
+
+
+    private Map<String, List<Pair<Long, Long>>> orderingRangesAsPairs() {
+        Map<String, List<Pair<Long, Long>>> ranges = new HashMap<>();
+        orderingViolations.forEach((key, values) -> ranges.put(key, values.stream()
+                .map(range -> Pair.of(range.start(), range.end())).toList()));
+        return ranges;
+    }
+
     /** Map storing write duplicates sequence ranges from producer for each key */
     private volatile Map<String, List<SeqRange>> writeDuplicatesSeqs = Collections.emptyMap();
 
@@ -202,6 +234,46 @@ public class ConsumerCheckPoint {
         });
     }
 
+    /** Merge cumulative inclusive violation ranges without counting a repeated snapshot twice. */
+    public synchronized void addOrderingViolations(Map<String, List<Pair<Long, Long>>> incoming) {
+        if (incoming.isEmpty()) {
+            return;
+        }
+        Map<String, List<Pair<Long, Long>>> merged = new HashMap<>(orderingRangesAsPairs());
+        incoming.forEach((key, ranges) -> {
+            List<Pair<Long, Long>> sorted = new ArrayList<>(merged.getOrDefault(key, List.of()));
+            sorted.addAll(ranges);
+            sorted.sort(Comparator.comparingLong(Pair::getLeft));
+            List<Pair<Long, Long>> compacted = new ArrayList<>();
+            for (Pair<Long, Long> range : sorted) {
+                if (compacted.isEmpty()) {
+                    compacted.add(range);
+                    continue;
+                }
+                Pair<Long, Long> last = compacted.getLast();
+                if (range.getLeft() <= last.getRight()
+                        || last.getRight() != Long.MAX_VALUE && range.getLeft() == last.getRight() + 1) {
+                    compacted.set(compacted.size() - 1,
+                            Pair.of(last.getLeft(), Math.max(last.getRight(), range.getRight())));
+                } else {
+                    compacted.add(range);
+                }
+            }
+            merged.put(key, compacted);
+        });
+        outOfOrderSeqs = merged;
+        Map<String, List<OrderingRange>> wire = new HashMap<>();
+        merged.forEach((key, ranges) -> wire.put(key, ranges.stream()
+                .map(range -> new OrderingRange(range.getLeft(), range.getRight())).toList()));
+        orderingViolations = wire;
+    }
+
+    /** Preserve cumulative order evidence even when delivery verification has not caught up. */
+    public void mergeOrderingEvidence(ConsumerCheckPoint checkPoint) {
+        addOrderingViolations(checkPoint.orderingRangesAsPairs());
+        checkPoint.orderingEvidence.forEach(this::addOrderingEvidence);
+    }
+
     /**
      * Merges another ConsumerCheckPoint into this one.
      * All sequence ranges from the other checkpoint will be added to this one.
@@ -211,6 +283,7 @@ public class ConsumerCheckPoint {
     public void merge(ConsumerCheckPoint checkPoint) {
         checkPoint.consumed.forEach(this::addKey);
         checkPoint.writeDupsOrOutOrder.forEach(this::addWriteDupsOrOutOrder);
+        mergeOrderingEvidence(checkPoint);
     }
 
     /**
@@ -236,6 +309,7 @@ public class ConsumerCheckPoint {
      * Updates the missedSeqs and duplicatedCount maps.
      */
     public void calculate() {
+        outOfOrderSeqs = orderingRangesAsPairs();
         Map<String, List<SeqRange>> missedSeqs = new HashMap<>();
         Map<String, Long> duplicatedCount = new HashMap<>();
         Map<String, List<SeqRange>> writeDups = new HashMap<>();
@@ -447,7 +521,7 @@ public class ConsumerCheckPoint {
 
         // Sort ranges by start sequence number to ensure proper merging
         List<SeqRange> sortedRanges = ranges.stream()
-            .sorted(java.util.Comparator.comparingLong(r -> r.getStart().seq()))
+            .sorted(Comparator.comparingLong(r -> r.getStart().seq()))
             .toList();
 
         List<SeqRange> mergedRanges = new ArrayList<>();

@@ -13,6 +13,7 @@
  */
 package io.lakestream.streaming.proof.driver.kafka;
 
+import io.lakestream.streaming.proof.common.DeliveryContext;
 import io.lakestream.streaming.proof.common.MessageListener;
 import io.lakestream.streaming.proof.common.MessageMetadata;
 import io.lakestream.streaming.proof.common.ProofConsumer;
@@ -139,7 +140,8 @@ public class KafkaAtLeastOnceProofConsumer implements ProofConsumer {
                                     callback.onMessage(record.key(), record.value().seq(),
                                             MessageMetadata.kafkaMetadata(
                                                     record.offset(), record.partition(),
-                                                    originalOffset, record.timestamp()));
+                                                    originalOffset, record.timestamp()),
+                                            DeliveryContext.kafka());
 
                                     offsetMap.put(
                                             new TopicPartition(record.topic(), record.partition()),

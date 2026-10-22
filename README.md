@@ -445,3 +445,33 @@ output:
 ## License
 
 Licensed under the [Apache License, Version 2.0](LICENSE).
+
+### Ordering verification scope
+
+Proofs requesting `ordering` enable the same protocol-aware verification pipeline for all consumers;
+there is no single-consumer restriction or Pulsar-only strict mode.
+
+- Kafka checks increasing offsets per partition and consumer assignment epoch, including records with
+  different keys. Revoke/lost and reassignment events permit a lower recovery offset; cooperative
+  assignments retain the baseline for partitions that were not revoked. Consumers and partitions
+  are never ordered by worker wall-clock timestamps.
+- Classic Pulsar Failover/Exclusive check first deliveries across keys within each partition;
+  Key_Shared and Scalable Stream check per key and partition using message positions
+  (ledger, entry, batch index and scalable segment where applicable). Already observed sequences and
+  protocol-marked redeliveries are not counted as new delivery inversions. Shared and Scalable Queue
+  do not assert ordering.
+- A business sequence decreasing at an increasing log position is a publication-order issue, not a
+  consumer-delivery inversion. This checker does not replace producer diagnostics or claim ordering
+  across independent producers.
+
+Violations and coverage evidence are cumulative across verification watermarks, worker checkpoint
+serialization and coordinator snapshot replacement, even when a delivery checkpoint cannot advance.
+Reports expose `orderingVerification` with the checked scope, observation count and limitations.
+Missing protocol evidence produces an **inconclusive** final result instead of an ordering pass.
+
+Pulsar cross-consumer ownership/handoff events are not currently exposed to this verifier, so
+multi-consumer Pulsar ordering proofs explicitly remain inconclusive even when local checks find
+no violations. A backward checkpoint read without replay provenance is also inconclusive. Kafka
+verification covers each observed assignment epoch; this does not claim global callback-time order
+across consumer processes, application processing order, or preservation of checker state after a
+worker-process restart. Worker loss that removes a consumer's evidence cannot silently pass.
