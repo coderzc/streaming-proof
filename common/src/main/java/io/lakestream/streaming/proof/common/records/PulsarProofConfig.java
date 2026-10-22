@@ -58,6 +58,9 @@ public class PulsarProofConfig {
      */
     private String consumerType;
 
+    /** Enable replay-aware first-delivery ordering checks for exactly one ordered scalable consumer. */
+    private boolean strictOrdering;
+
     /**
      * Returns whether consumers receive messages without per-key ordering: a Shared subscription,
      * or queue consumers on a scalable topic.

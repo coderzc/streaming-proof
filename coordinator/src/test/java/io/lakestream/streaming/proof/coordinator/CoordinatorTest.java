@@ -107,6 +107,44 @@ public class CoordinatorTest {
                 "pulsar.initialSegments and pulsar.consumerType require pulsar.scalableTopicEnabled.");
     }
 
+    @Test
+    public void testStrictOrderingRejectsUnsupportedScopesBeforeStartingDrivers() {
+        Coordinator coordinator = new Coordinator();
+        coordinator.updateConfigs(new Configs(Map.of(),
+                Map.of("pulsar", new Driver("pulsar", Map.of(), null))));
+        String error = "pulsar.strictOrdering requires one scalable stream/checkpoint "
+                + "consumer and the ordering feature.";
+        for (String type : List.of("stream", "queue", "checkpoint")) {
+            Proof invalidCount = pulsarProof(PulsarProofConfig.builder().scalableTopicEnabled(true)
+                    .consumerType(type).strictOrdering(true).build())
+                    .features(List.of("at_least_once", "ordering")).consumers(2).build();
+            assertCreateProofRejected(coordinator, invalidCount, error);
+        }
+        assertCreateProofRejected(coordinator,
+                pulsarProof(PulsarProofConfig.builder().scalableTopicEnabled(true)
+                        .consumerType("queue").strictOrdering(true).build())
+                        .features(List.of("at_least_once", "ordering")).consumers(1).build(), error);
+        assertCreateProofRejected(coordinator,
+                pulsarProof(PulsarProofConfig.builder().strictOrdering(true).build())
+                        .features(List.of("at_least_once", "ordering")).consumers(1).build(), error);
+        assertCreateProofRejected(coordinator,
+                pulsarProof(PulsarProofConfig.builder().scalableTopicEnabled(true)
+                        .strictOrdering(true).build()).consumers(1).build(), error);
+    }
+
+    @Test
+    public void testStrictOrderingAcceptsOneOrderedScalableConsumer() {
+        for (String type : List.of("stream", "checkpoint")) {
+            Proof proof = pulsarProof(PulsarProofConfig.builder().scalableTopicEnabled(true)
+                    .consumerType(type).strictOrdering(true).build())
+                    .features(List.of("at_least_once", "ordering")).consumers(1).build();
+            Coordinator.validateScalableTopicSettings(proof);
+        }
+        Coordinator.validateScalableTopicSettings(pulsarProof(PulsarProofConfig.builder()
+                .scalableTopicEnabled(true).strictOrdering(true).build())
+                .features(List.of("at_least_once", "ordering")).consumers(1).build());
+    }
+
     private static Proof.ProofBuilder pulsarProof(PulsarProofConfig pulsar) {
         return Proof.builder()
                 .name("scalable")

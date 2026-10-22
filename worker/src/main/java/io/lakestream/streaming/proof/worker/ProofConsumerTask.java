@@ -13,6 +13,7 @@
  */
 package io.lakestream.streaming.proof.worker;
 
+import io.lakestream.streaming.proof.common.FirstDeliveryOrderTracker;
 import io.lakestream.streaming.proof.common.LongSeq;
 import io.lakestream.streaming.proof.common.MessageListener;
 import io.lakestream.streaming.proof.common.MessageMetadata;
@@ -31,6 +32,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import lombok.Getter;
 import lombok.Setter;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.lang3.tuple.Pair;
 
 /**
  * A task that consumes messages and tracks sequence ranges for validation.
@@ -59,8 +61,22 @@ public class ProofConsumerTask implements MessageListener, AutoCloseable {
     }
 
     public ProofConsumerTask(boolean sharedMode, int messageSize) {
+        this(sharedMode, messageSize, false);
+    }
+
+    public ProofConsumerTask(boolean sharedMode, int messageSize, boolean strictOrdering) {
+        if (sharedMode && strictOrdering) {
+            throw new IllegalArgumentException("Strict ordering is not valid for unordered consumers");
+        }
         this.sharedMode = sharedMode;
         this.messageSize = messageSize;
+        this.orderTracker = strictOrdering ? new FirstDeliveryOrderTracker() : null;
+    }
+
+    private final FirstDeliveryOrderTracker orderTracker;
+
+    public Map<String, List<Pair<Long, Long>>> getOrderingViolations() {
+        return orderTracker == null ? Map.of() : orderTracker.violations();
     }
 
     /** Total size in bytes of each message value, used for throughput accounting */
@@ -106,6 +122,9 @@ public class ProofConsumerTask implements MessageListener, AutoCloseable {
      */
     @Override
     public synchronized void onMessage(String key, long value, MessageMetadata metadata) {
+        if (orderTracker != null) {
+            orderTracker.observe(key, value);
+        }
         receivedMessages.incrementAndGet();
         receivedBytes.addAndGet(estimateMessageBytes(key));
         if (metadata != null && metadata.publishTimestampMillis() != null && metadata.publishTimestampMillis() > 0) {

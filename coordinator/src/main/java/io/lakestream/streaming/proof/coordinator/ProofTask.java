@@ -455,7 +455,7 @@ public class ProofTask {
      * Attempts to evenly distribute the configured number of consumers
      * across all available workers.
      */
-    private void startConsumers() {
+    void startConsumers() {
         int workerCount = clients.size();
         // Distribute consumers to workers
         int totalConsumers = proof.getConsumers();
@@ -477,7 +477,8 @@ public class ProofTask {
                     driverName,
                     configs.drivers().get(driverName),
                     pulsarConsumerConfig,
-                    pulsarConsumerType
+                    pulsarConsumerType,
+                    proof.getPulsar() != null && proof.getPulsar().isStrictOrdering()
             );
             try {
                 clients.get(i).startConsumers(record).join();
@@ -949,6 +950,11 @@ public class ProofTask {
                         : buildPerformanceSummary(summary);
         String status = determineResultStatus(summary, performanceSummary);
         String resultReason = determineResultReason(summary, performanceSummary, status);
+        if (proof.isScalableTopic() && proof.getFeatures().contains("ordering")
+                && !proof.getPulsar().isStrictOrdering()) {
+            resultReason += " First-delivery ordering was not independently validated; enable "
+                    + "pulsar.strictOrdering with one ordered consumer.";
+        }
         // Append a trailing point that extends the chart to the current elapsed time.
         // Reuse the last windowed point's rates and latency so the chart stays flat
         // instead of snapping to the cumulative average.  Only the absolute counters

@@ -165,8 +165,14 @@ public class Coordinator {
     }
 
     /** Scalable topics take initial segments and a consumer type instead of partitions and a subscription type. */
-    private static void validateScalableTopicSettings(Proof proof) {
+    static void validateScalableTopicSettings(Proof proof) {
         PulsarProofConfig pulsar = proof.getPulsar();
+        if (pulsar != null && pulsar.isStrictOrdering()
+                && (!proof.isScalableTopic() || proof.getConsumers() != 1
+                || "queue".equals(pulsar.getConsumerType()) || !proof.getFeatures().contains("ordering"))) {
+            throw new IllegalArgumentException("pulsar.strictOrdering requires one scalable stream/checkpoint "
+                    + "consumer and the ordering feature.");
+        }
         if (!proof.isScalableTopic()) {
             if (pulsar != null && (pulsar.getInitialSegments() != null || pulsar.getConsumerType() != null)) {
                 throw new IllegalArgumentException(

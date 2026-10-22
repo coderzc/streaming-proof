@@ -281,6 +281,35 @@ topics have no partitions or subscription types, so `partitions` and `pulsar.con
 The `offload.condition.*` settings apply to classic topics only. The broker splits and merges segments on its own
 unless auto scaling is disabled for the namespace or topic.
 
+#### Strict single-consumer ordering
+
+To validate **first-delivery ordering** on a scalable topic, set `"strictOrdering": true`
+inside the `pulsar` object, use `"consumers": 1`, include the
+`"ordering"` feature, and choose a `stream` or `checkpoint` consumer. For example:
+
+```json
+{
+  "driver": "pulsar_driver",
+  "features": ["at_least_once", "ordering"],
+  "consumers": 1,
+  "pulsar": {
+    "scalableTopicEnabled": true,
+    "initialSegments": 2,
+    "consumerType": "stream",
+    "strictOrdering": true
+  }
+}
+```
+
+This opt-in checker records each sequence's first delivery per key. A previously unseen sequence
+below the largest first-delivered sequence is an ordering violation; already seen sequences are
+replays. Compact interval state and cumulative violations survive verification watermark trimming
+and reader recreation within the same worker task. Violations travel through worker checkpoints
+and fail the final report. Queue mode, classic topics, missing ordering assertions and multiple
+consumers are rejected for this setting. It does not validate grouped consumer handoffs or preserve
+checker state across a worker-process restart. Existing Scalable proofs that request ordering without
+strict mode explicitly qualify the ordering claim in their report reason.
+
 5. Stop all the components:
 
 ```bash
