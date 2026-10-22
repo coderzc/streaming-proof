@@ -92,6 +92,9 @@ public class ProofProducerTask implements AutoCloseable {
      */
     private final Map<String, LongSeq> lastPublished;
 
+    /** Last acknowledgement with a known position, guarded by lastPublished. */
+    private final Map<String, LongSeq> lastPositioned = new HashMap<>();
+
     /** Aggregated timing details for failed message sends */
     private final Map<String, ErrorOccurrence> errorDetails = new HashMap<>();
 
@@ -177,10 +180,18 @@ public class ProofProducerTask implements AutoCloseable {
                                     key, newMsg, previousMsg);
                             recordError("Seq writes gap", System.currentTimeMillis());
                         }
-                        if (!metadata.isAfter(previousMsg.metadata())) {
+                    }
+                    // Duplicate acknowledgements can succeed without a known log position.
+                    // Keep the last known position so they neither report nor hide a regression.
+                    if (hasPosition(metadata)) {
+                        LongSeq previousPositioned = lastPositioned.get(key);
+                        if (previousPositioned != null && !metadata.isAfter(previousPositioned.metadata())) {
                             log.error("Offset out of order writes | key: {} | new message: {} | previous message: {}",
-                                    key, newMsg, previousMsg);
+                                    key, newMsg, previousPositioned);
                             recordError("Offset out of order writes", System.currentTimeMillis());
+                        }
+                        if (previousPositioned == null || newMsg.compareTo(previousPositioned) > 0) {
+                            lastPositioned.put(key, newMsg);
                         }
                     }
                     // A delayed completion must not move the published checkpoint backward.
@@ -190,6 +201,13 @@ public class ProofProducerTask implements AutoCloseable {
                 }
             }
         });
+    }
+
+    private static boolean hasPosition(MessageMetadata metadata) {
+        if (metadata.ledgerId() != null && metadata.entryId() != null) {
+            return metadata.ledgerId() >= 0 && metadata.entryId() >= 0;
+        }
+        return metadata.offset() != null && metadata.offset() >= 0;
     }
 
     public long getSendAttempts() {
