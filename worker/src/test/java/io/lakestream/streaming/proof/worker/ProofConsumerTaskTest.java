@@ -360,10 +360,11 @@ public class ProofConsumerTaskTest {
             generateMessage(consumerTask, KEY1, 5L, createMetadata(12L));
             generateMessage(consumerTask, KEY1, 6L, createMetadata(13L));
             merged = consumerTask.getTrimmedConsumed();
-            assertEquals(merged.get(KEY1).size(), 2);
-            assertEquals(merged.get(KEY1).lastEntry().getValue().getStart().seq(), 3L);
+            // Keep the late writes and earlier-position replay separate for coordinator range analysis.
+            assertEquals(merged.get(KEY1).size(), 4);
+            assertEquals(merged.get(KEY1).lastEntry().getValue().getStart().seq(), 5L);
             assertEquals(merged.get(KEY1).lastEntry().getValue().getEnd().seq(), 6L);
-            assertEquals(merged.get(KEY1).lastEntry().getValue().getDuplicated(), 1);
+            assertEquals(merged.get(KEY1).lastEntry().getValue().getDuplicated(), 0);
         }
     }
 }

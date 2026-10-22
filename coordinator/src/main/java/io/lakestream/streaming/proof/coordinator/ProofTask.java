@@ -775,6 +775,11 @@ public class ProofTask {
                 throw new RuntimeException(e);
             }
         }
+        // Order evidence must survive snapshot replacement, even when delivery verification is stalled.
+        aggregatedConsumerCheckpoint.calculate();
+        aggregatedConsumerCheckpoint.mergeOutOfOrderSeqs(latestConsumerCheckpoint.getOutOfOrderSeqs());
+        aggregatedConsumerCheckpoint.mergeOutOfOrderSeqs(lastVerifiedConsumerCheckpoint.getOutOfOrderSeqs());
+        lastVerifiedConsumerCheckpoint.mergeOutOfOrderSeqs(aggregatedConsumerCheckpoint.getOutOfOrderSeqs());
         return Pair.of(aggregatedProducerCheckpoint, aggregatedConsumerCheckpoint);
     }
 
@@ -863,11 +868,11 @@ public class ProofTask {
         return new ProofSummary(
                 verified,
                 countProducerErrors(this.getLastVerifiedProducerCheckpoint()),
-                lastVerifiedConsumerCheckpoint.getOutOfOrderSeqs().values().stream()
-                        .flatMap(ranges -> ranges.stream()
-                                .map(range -> range.getRight() - range.getLeft() + 1))
-                        .mapToInt(Long::intValue)
-                        .sum(),
+                proof.getFeatures().contains("ordering")
+                        ? lastVerifiedConsumerCheckpoint.getOutOfOrderSeqs().values().stream()
+                                .flatMap(ranges -> ranges.stream()
+                                        .map(range -> range.getRight() - range.getLeft() + 1))
+                                .mapToInt(Long::intValue).sum() : 0,
                 lastVerifiedConsumerCheckpoint.getMissedSeqs().values().stream()
                         .flatMap(ranges -> ranges.stream()
                                 .map(range -> range.getEnd().seq() - range.getStart().seq() - 1))
