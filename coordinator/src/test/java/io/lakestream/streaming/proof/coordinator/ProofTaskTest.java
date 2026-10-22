@@ -59,6 +59,29 @@ import org.testng.annotations.Test;
 public class ProofTaskTest {
 
     @Test
+    public void testWriteDuplicateSummaryCountsInclusiveSequenceRanges() {
+        ProofTask task = new ProofTask(Proof.builder().topic("duplicates").build(),
+                new Configs(Map.of(), Map.of()), mock(ProofDriver.class));
+        try {
+            ConsumerCheckPoint cp = task.getLastVerifiedConsumerCheckpoint();
+            ConsumerCheckPoint.SeqRange consumed = new ConsumerCheckPoint.SeqRange();
+            consumed.setStart(new LongSeq(0, MessageMetadata.empty()));
+            consumed.setEnd(new LongSeq(20, MessageMetadata.empty()));
+            cp.addKey("key", new TreeMap<>(Map.of("consumed", consumed)));
+            ConsumerCheckPoint.SeqRange singleton = new ConsumerCheckPoint.SeqRange();
+            singleton.setStart(new LongSeq(5, MessageMetadata.empty()));
+            singleton.setEnd(new LongSeq(5, MessageMetadata.empty()));
+            ConsumerCheckPoint.SeqRange multiple = new ConsumerCheckPoint.SeqRange();
+            multiple.setStart(new LongSeq(10, MessageMetadata.empty()));
+            multiple.setEnd(new LongSeq(12, MessageMetadata.empty()));
+            cp.addWriteDupsOrOutOrder("key", new TreeMap<>(Map.of("single", singleton, "multiple", multiple)));
+            assertEquals(task.getSummary().writeDuplicates(), 4L);
+        } finally {
+            task.getExecutor().shutdownNow();
+        }
+    }
+
+    @Test
     public void testCreateProofTopicsCreatesOutputTopicAcrossDistinctGeoDrivers() {
         ProofDriver adminDriver = mock(ProofDriver.class);
         ProofDriver consumerDriver = mock(ProofDriver.class);
