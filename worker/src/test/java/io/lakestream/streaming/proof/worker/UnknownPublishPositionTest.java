@@ -32,6 +32,7 @@ public class UnknownPublishPositionTest {
         return new Object[][] {
             {List.of(unknown), 0L},
             {List.of(first, unknown), 0L},
+            {List.of(first, new MessageMetadata(-1L, -1L, 3), new MessageMetadata(10L, 6L)), 0L},
             {List.of(first, unknown, unknown, new MessageMetadata(10L, 6L)), 0L},
             {List.of(first, unknown, new MessageMetadata(10L, 4L)), 1L},
             {List.of(first, unknown, first), 1L},

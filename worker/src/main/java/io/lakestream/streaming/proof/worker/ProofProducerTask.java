@@ -193,6 +193,9 @@ public class ProofProducerTask implements AutoCloseable {
                         if (previousPositioned == null || newMsg.compareTo(previousPositioned) > 0) {
                             lastPositioned.put(key, newMsg);
                         }
+                    } else {
+                        log.debug("Acknowledged without position | key: {} | new message: {} | last known: {}",
+                                key, newMsg, lastPositioned.get(key));
                     }
                     // A delayed completion must not move the published checkpoint backward.
                     if (previousMsg == null || newMsg.compareTo(previousMsg) > 0) {
