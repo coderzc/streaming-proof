@@ -50,6 +50,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -648,8 +649,8 @@ public class ProofTask {
             checkPointInCheckTimeStamps = System.currentTimeMillis();
         } else if (Duration.ofMillis(System.currentTimeMillis() - checkPointInCheckTimeStamps)
                 .compareTo(Duration.ofSeconds(proof.getTimeout())) > 0) {
-            log.error("[{}] shared checkpoint verify failed: {}", proof.getId(), getSummary());
             failed = true;
+            log.error("[{}] shared checkpoint verify failed: {}", proof.getId(), getSummary());
             lastFailedProducerCheckpoint = inCheck;
             lastFailedConsumerCheckpoint = latestConsumerCheckpoint;
             timeouts++;
@@ -666,7 +667,6 @@ public class ProofTask {
         log.info("Stopping proof task {} after reaching the specified duration of {} seconds",
                 proof.getId(), proof.getDuration());
         recordTimeSeriesPoint();
-        sendCompletionNotification(getSummary());
         stop();
     }
 
@@ -758,6 +758,7 @@ public class ProofTask {
                 return;
             }
         }
+        failed = true;
         log.warn("[{}] Final verification: consumers did not catch up within {} seconds",
                 proof.getId(), maxRetries);
     }
@@ -822,11 +823,11 @@ public class ProofTask {
 
     /**
      * Wall-clock seconds since the verified count last increased. While the run
-     * is active this grows with the clock; once stopped it is frozen at the
-     * completion time so historical reports stay stable.
+     * is verifying this grows with the clock; once the final verification is done
+     * it is frozen at the completion time so historical reports stay stable.
      */
     private long computeVerifiedStallSeconds() {
-        long end = running.get() ? System.currentTimeMillis() : completionMillis;
+        long end = running.get() && completionMillis == 0 ? System.currentTimeMillis() : completionMillis;
         return Math.max(0L, (end - lastVerifiedChangeMillis) / 1000);
     }
 
@@ -835,7 +836,7 @@ public class ProofTask {
      * peak so the value is correct between ticks, and is frozen at completion.
      */
     private long computeMaxVerifiedStallSeconds() {
-        long end = running.get() ? System.currentTimeMillis() : completionMillis;
+        long end = running.get() && completionMillis == 0 ? System.currentTimeMillis() : completionMillis;
         long liveStallMillis = end - lastVerifiedChangeMillis;
         return Math.max(0L, Math.max(maxVerifiedStallMillis, liveStallMillis)) / 1000;
     }
@@ -854,11 +855,7 @@ public class ProofTask {
                     verified,
                     countProducerErrors(this.getLastVerifiedProducerCheckpoint()),
                     0, // out-of-order: not applicable for Shared
-                    cp.getMissedSeqs().values().stream()
-                            .flatMap(ranges -> ranges.stream()
-                                    .map(range -> range.getEnd().seq() - range.getStart().seq() - 1))
-                            .mapToInt(Long::intValue)
-                            .sum(),
+                    countSharedMissed(),
                     cp.getDuplicatedCount().values().stream().reduce(0L, Long::sum),
                     0, // write duplicates: not tracked in shared mode
                     this.getTimeouts(),
@@ -890,6 +887,23 @@ public class ProofTask {
                 this.getTimeouts(),
                 computeVerifiedStallSeconds(),
                 computeMaxVerifiedStallSeconds());
+    }
+
+    /**
+     * Shared consumers receive a key's messages in any order, so a gap is normally a message still on its
+     * way to another consumer. A message only counts as missed once the in-check checkpoint covering it
+     * failed verification and it is still not consumed.
+     */
+    private int countSharedMissed() {
+        if (!failed) {
+            return 0;
+        }
+        long missed = inCheck.getPublished().entrySet().stream()
+                .mapToLong(entry -> latestConsumerCheckpoint.countUnconsumed(entry.getKey(),
+                        highWatermarks.getOrDefault(entry.getKey(), -1L), entry.getValue().seq()))
+                .sum();
+        // Clamp: a count wrapped to a negative int would let the run pass
+        return (int) Math.min(missed, Integer.MAX_VALUE);
     }
 
     /**
@@ -1481,12 +1495,13 @@ public class ProofTask {
      * Sends webhook notification when proof test completes with results.
      *
      * @param summary The proof execution summary
+     * @return A future that completes once the notification is sent or failed, never exceptionally
      */
-    public void sendCompletionNotification(ProofSummary summary) {
+    public CompletableFuture<Void> sendCompletionNotification(ProofSummary summary) {
         if (proof.getWebhookConfig() != null && proof.getWebhookConfig().isEnabled()) {
             try {
-                webhookService.sendProofCompletionNotification(proof, summary)
-                        .whenComplete((result, throwable) -> {
+                return webhookService.sendProofCompletionNotification(proof, summary)
+                        .handle((result, throwable) -> {
                             if (throwable != null) {
                                 log.error("Failed to send completion webhook notification for proof {}",
                                         proof.getId(), throwable);
@@ -1494,12 +1509,14 @@ public class ProofTask {
                                 log.info("Successfully sent completion webhook notification for proof {}",
                                         proof.getId());
                             }
+                            return null;
                         });
             } catch (Exception e) {
                 log.error("Error sending completion webhook notification for proof {}",
                         proof.getId(), e);
             }
         }
+        return CompletableFuture.completedFuture(null);
     }
 
     /**
@@ -1533,9 +1550,19 @@ public class ProofTask {
         // fully-verified state after all consumers have caught up.
         recordTimeSeriesPoint();
 
+        // Verification ends here: stopping consumers and notifying must not count as a stall
+        completionMillis = System.currentTimeMillis();
+
         // Build the final performance snapshot after verification has
         // settled, while worker metrics are still available.
         latestPerformanceSummary = buildPerformanceSummary(getSummary());
+
+        // Notify after final verification, so the webhook carries the final result. Wait for it
+        // before removing consumers, so reports during the wait still read their metrics, and
+        // before closing the webhook client, which would abort it.
+        if (completionHandled.get()) {
+            sendCompletionNotification(getSummary()).join();
+        }
 
         clients.forEach(client -> {
             try {
@@ -1551,7 +1578,6 @@ public class ProofTask {
 
         // Mark as stopped only after all cleanup is complete, so the
         // report API never returns "stopped" with stale data.
-        completionMillis = System.currentTimeMillis();
         running.set(false);
         log.info("ProofTask {} stopped", proof.getId());
     }

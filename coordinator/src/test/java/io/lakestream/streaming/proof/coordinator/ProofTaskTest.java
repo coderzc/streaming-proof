@@ -13,6 +13,8 @@
  */
 package io.lakestream.streaming.proof.coordinator;
 
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
@@ -51,8 +53,10 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.apache.commons.lang3.tuple.Pair;
+import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 import org.testng.annotations.Test;
 
@@ -729,6 +733,161 @@ public class ProofTaskTest {
         } finally {
             task.getExecutor().shutdownNow();
         }
+    }
+
+    @Test
+    public void testSharedModeInFlightGapsAreNotMissed() throws Exception {
+        ProofTask task = newSharedTask();
+        try {
+            sharedTick(task, 9, new long[]{0, 9});
+            // 13 is still on its way to another consumer, not missed
+            sharedTick(task, 19, new long[]{10, 12}, new long[]{14, 17});
+
+            assertEquals(task.getSummary().verified(), 13L);
+            assertEquals(task.getSummary().missed(), 0);
+        } finally {
+            task.getExecutor().shutdownNow();
+        }
+    }
+
+    @Test
+    public void testSharedModeCountsMessagesStillMissingAfterTimeout() throws Exception {
+        ProofTask task = newSharedTask();
+        try {
+            sharedTick(task, 9, new long[]{0, 9});
+            sharedTick(task, 19, new long[]{10, 12}, new long[]{14, 14}, new long[]{16, 17});
+
+            // The in-check up to seq 19 times out: 15 arrived, 13 did not, 23-25 are past the in-check
+            setLongField(task, "checkPointInCheckTimeStamps", System.currentTimeMillis() - 60_000L);
+            sharedTick(task, 25, new long[]{14, 22});
+            assertEquals(task.getTimeouts(), 1);
+            assertEquals(task.getSummary().missed(), 1);
+
+            sharedTick(task, 25, new long[]{13, 25});
+            assertEquals(task.getSummary().missed(), 0);
+        } finally {
+            task.getExecutor().shutdownNow();
+        }
+    }
+
+    @Test
+    public void testSharedModeFinalVerificationReportsUnconsumedMessages() throws Exception {
+        ProofTask task = newSharedTask();
+        try {
+            ProducerCheckpoint producerCp = new ProducerCheckpoint();
+            producerCp.addPublished("key0", new LongSeq(19, MessageMetadata.empty()));
+            // 13 and 19 never arrive
+            doReturn(Pair.of(producerCp, consumed(new long[]{0, 12}, new long[]{14, 18})))
+                    .when(task).aggregateCheckpoints();
+
+            invokeRunFinalVerification(task);
+
+            assertEquals(task.getSummary().missed(), 2);
+        } finally {
+            task.getExecutor().shutdownNow();
+        }
+    }
+
+    @Test
+    public void testSharedModeMissedIsClampedInsteadOfOverflowing() throws Exception {
+        ProofTask task = newSharedTask();
+        try {
+            ProducerCheckpoint producerCp = new ProducerCheckpoint();
+            producerCp.addPublished("key0", new LongSeq(Integer.MAX_VALUE, MessageMetadata.empty()));
+            // Nothing consumed: Integer.MAX_VALUE + 1 messages are missing
+            doReturn(Pair.of(producerCp, new ConsumerCheckPoint())).when(task).aggregateCheckpoints();
+
+            invokeRunFinalVerification(task);
+
+            assertEquals(task.getSummary().missed(), Integer.MAX_VALUE);
+        } finally {
+            task.getExecutor().shutdownNow();
+        }
+    }
+
+    @Test
+    public void testCompletionNotificationCarriesFinalVerificationResult() throws Exception {
+        ProofTask task = newSharedTask();
+        try {
+            ProducerCheckpoint producerCp = new ProducerCheckpoint();
+            producerCp.addPublished("key0", new LongSeq(19, MessageMetadata.empty()));
+            // No timeout fired during the run, and 13 and 19 never arrive
+            doReturn(Pair.of(producerCp, consumed(new long[]{0, 12}, new long[]{14, 18})))
+                    .when(task).aggregateCheckpoints();
+
+            Method method = ProofTask.class.getDeclaredMethod("completeProofAfterDuration");
+            method.setAccessible(true);
+            method.invoke(task);
+
+            ArgumentCaptor<ProofSummary> notified = ArgumentCaptor.forClass(ProofSummary.class);
+            verify(task).sendCompletionNotification(notified.capture());
+            assertEquals(notified.getValue().missed(), 2);
+        } finally {
+            task.getExecutor().shutdownNow();
+        }
+    }
+
+    @Test
+    public void testSlowCompletionWebhookDoesNotCountAsStall() throws Exception {
+        ProofTask task = newSharedTask();
+        try {
+            getRunningFlag(task).set(true);
+            ProducerCheckpoint producerCp = new ProducerCheckpoint();
+            producerCp.addPublished("key0", new LongSeq(9, MessageMetadata.empty()));
+            doReturn(Pair.of(producerCp, consumed(new long[]{0, 9}))).when(task).aggregateCheckpoints();
+            doAnswer(invocation -> {
+                Thread.sleep(1_100); // a slow webhook endpoint
+                return CompletableFuture.completedFuture(null);
+            }).when(task).sendCompletionNotification(any());
+
+            Method method = ProofTask.class.getDeclaredMethod("completeProofAfterDuration");
+            method.setAccessible(true);
+            method.invoke(task);
+
+            assertEquals(task.getSummary().maxVerifiedStallSeconds(), 0L);
+        } finally {
+            task.getExecutor().shutdownNow();
+        }
+    }
+
+    private static ProofTask newSharedTask() {
+        Proof proof = Proof.builder()
+                .id("test-proof")
+                .topic("test-topic")
+                .features(List.of("at_least_once"))
+                .timeout(30)
+                .finalWaitSeconds(0)
+                .pulsar(PulsarProofConfig.builder()
+                        .consumerConfig(Map.of("subscriptionType", "Shared"))
+                        .build())
+                .build();
+        return spy(new ProofTask(proof, new Configs(Map.of(), Map.of()), mock(ProofDriver.class)));
+    }
+
+    /** Runs one shared checkpoint verification with key0 published up to seq and consumed in ranges. */
+    private static void sharedTick(ProofTask task, long seq, long[]... ranges) throws Exception {
+        ProducerCheckpoint producerCp = new ProducerCheckpoint();
+        producerCp.addPublished("key0", new LongSeq(seq, MessageMetadata.empty()));
+        Field producerField = ProofTask.class.getDeclaredField("latestProducerCheckpoint");
+        producerField.setAccessible(true);
+        producerField.set(task, producerCp);
+        task.setLatestConsumerCheckpoint(consumed(ranges));
+        Method verifyShared = ProofTask.class.getDeclaredMethod("verifyShared");
+        verifyShared.setAccessible(true);
+        verifyShared.invoke(task);
+    }
+
+    private static ConsumerCheckPoint consumed(long[]... ranges) {
+        TreeMap<String, ConsumerCheckPoint.SeqRange> rangeMap = new TreeMap<>();
+        for (int i = 0; i < ranges.length; i++) {
+            ConsumerCheckPoint.SeqRange range = new ConsumerCheckPoint.SeqRange();
+            range.setStart(new LongSeq(ranges[i][0], MessageMetadata.empty()));
+            range.setEnd(new LongSeq(ranges[i][1], MessageMetadata.empty()));
+            rangeMap.put("t" + i, range);
+        }
+        ConsumerCheckPoint checkpoint = new ConsumerCheckPoint();
+        checkpoint.addKey("key0", rangeMap);
+        return checkpoint;
     }
 
     @Test
