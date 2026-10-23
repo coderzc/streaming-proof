@@ -153,6 +153,9 @@ public class ProofConsumerTask implements MessageListener, AutoCloseable {
             log.info("[{}] Range gap detected | key: {} | new message: {} | last seq range: {}",
                     consumer.name(), key, newMsg, getLastSeq(key));
             newConsumedRange(key, newMsg);
+        } else if (!lastConsumedRange.canAppend(newMsg)) {
+            // Keep each range within one monotonic log-position span for coordinator analysis.
+            newConsumedRange(key, newMsg);
         } else {
             lastConsumedRange.setEnd(newMsg);
         }

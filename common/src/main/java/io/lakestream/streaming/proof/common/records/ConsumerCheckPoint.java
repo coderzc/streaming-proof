@@ -16,6 +16,7 @@ package io.lakestream.streaming.proof.common.records;
 import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import io.lakestream.streaming.proof.common.LongSeq;
+import io.lakestream.streaming.proof.common.MessageMetadata;
 import io.lakestream.streaming.proof.common.Util;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -87,6 +88,17 @@ public class ConsumerCheckPoint {
                     && other.getEnd().seq() >= this.getStart().seq();
         }
 
+        /** Preserve the order boundary while leaving position-less drivers' range collection unchanged. */
+        public boolean canAppend(LongSeq next) {
+            MessageMetadata before = end.metadata();
+            MessageMetadata after = next.metadata();
+            if (before != null && after != null && !java.util.Objects.equals(before.partition(), after.partition())) {
+                return false;
+            }
+            Integer order = comparePositions(before, after);
+            return order == null || order < 0;
+        }
+
         public boolean contains(SeqRange other) {
             return this.getStart().seq() <= other.getStart().seq()
                     && this.getEnd().seq() >= other.getEnd().seq();
@@ -101,14 +113,20 @@ public class ConsumerCheckPoint {
          * @return True if the ranges were merged, false otherwise
          */ 
         public boolean merge(SeqRange other) {
+            Integer positionOrder = comparePositions(start.metadata(), other.start.metadata());
+            if (positionOrder != null && Long.compare(start.seq(), other.start.seq()) * positionOrder < 0) {
+                return false; // Merging would erase evidence of a sequence/log-position inversion.
+            }
             if (hasOverlap(other)) {
                 long overlapStart = Math.max(this.getStart().seq(), other.getStart().seq());
                 long overlapEnd = Math.min(this.getEnd().seq(), other.getEnd().seq());
                 int overlapCount = (int) (overlapEnd - overlapStart + 1);
                 this.duplicated += overlapCount + other.getDuplicated();
                 // Set the new boundaries
-                this.start = this.start.compareTo(other.getStart()) < 0 ? this.getStart() : other.getStart();
-                this.end = this.end.compareTo(other.getEnd()) > 0 ? this.getEnd() : other.getEnd();                
+                this.start = start.seq() == other.start.seq() ? earlierOccurrence(start, other.start)
+                        : start.seq() < other.start.seq() ? start : other.start;
+                this.end = end.seq() == other.end.seq() ? earlierOccurrence(end, other.end)
+                        : end.seq() > other.end.seq() ? end : other.end;
                 return true;
             } else {
                 return false;
@@ -171,6 +189,9 @@ public class ConsumerCheckPoint {
     private volatile Map<String, Long> duplicatedCount = Collections.emptyMap();
     /** Map storing out-of-order sequence ranges for each key */
     private volatile Map<String, List<Pair<Long, Long>>> outOfOrderSeqs = Collections.emptyMap();
+    /** Verified prefix used for this coordinator snapshot, retained across recalculation. */
+    @JsonIgnore
+    private Map<String, Long> orderingWatermarks = Collections.emptyMap();
     /** Map storing write duplicates sequence ranges from producer for each key */
     private volatile Map<String, List<SeqRange>> writeDuplicatesSeqs = Collections.emptyMap();
 
@@ -252,6 +273,7 @@ public class ConsumerCheckPoint {
                 missedSeqs.put(key, missed);
             }
         });
+        mergeOutOfOrderSeqs(findOutOfOrderSeqs());
         this.missedSeqs = missedSeqs;
         this.duplicatedCount = duplicatedCount;
         this.writeDupsOrOutOrder.forEach((key, value) -> {
@@ -272,6 +294,115 @@ public class ConsumerCheckPoint {
             });
         });
         this.writeDuplicatesSeqs = writeDups;
+    }
+
+    private static LongSeq earlierOccurrence(LongSeq first, LongSeq second) {
+        Integer order = comparePositions(first.metadata(), second.metadata());
+        return order != null && order <= 0 ? first : second;
+    }
+
+    private static boolean hasLedgerPosition(MessageMetadata position) {
+        return position != null && position.ledgerId() != null && position.entryId() != null
+                && position.ledgerId() >= 0 && position.entryId() >= 0;
+    }
+
+    /** Compare positions only within one partition/log type; never compare worker clocks. */
+    private static Integer comparePositions(MessageMetadata left, MessageMetadata right) {
+        if (left == null || right == null || !java.util.Objects.equals(left.partition(), right.partition())) {
+            return null;
+        }
+        if (hasLedgerPosition(left) != hasLedgerPosition(right)) {
+            return null;
+        }
+        boolean ledger = hasLedgerPosition(left) && hasLedgerPosition(right);
+        boolean offset = left.offset() != null && right.offset() != null && left.offset() >= 0 && right.offset() >= 0;
+        if (ledger) {
+            return left.isAfter(right) ? 1 : right.isAfter(left) ? -1 : 0;
+        }
+        return offset ? Long.compare(left.offset(), right.offset()) : null;
+    }
+
+    /** Check sequence order in the retained log-position ranges, not cross-consumer callback timing. */
+    private Map<String, List<Pair<Long, Long>>> findOutOfOrderSeqs() {
+        Map<String, List<Pair<Long, Long>>> result = new HashMap<>();
+        consumed.forEach((key, ranges) -> {
+            Map<String, List<SeqRange>> partitions = new HashMap<>();
+            ranges.values().forEach(range -> {
+                MessageMetadata position = range.getStart().metadata();
+                if (comparePositions(position, position) != null
+                        && comparePositions(position, range.getEnd().metadata()) != null) {
+                    String scope = position.partition() + ":" + (hasLedgerPosition(position) ? "ledger" : "offset");
+                    partitions.computeIfAbsent(scope, ignored -> new ArrayList<>()).add(range);
+                }
+            });
+            partitions.values().forEach(ordered -> {
+                ordered.sort((a, b) -> comparePositions(a.getStart().metadata(), b.getStart().metadata()));
+                List<SeqRange> seen = new ArrayList<>();
+                long highest = -1;
+                for (SeqRange range : ordered) {
+                    List<Pair<Long, Long>> covered = trim(seen).stream()
+                            .map(previous -> Pair.of(previous.getStart().seq(), previous.getEnd().seq())).toList();
+                    long watermark = orderingWatermarks.getOrDefault(key, -1L);
+                    if (watermark < Long.MAX_VALUE) {
+                        result.computeIfAbsent(key, ignored -> new ArrayList<>()).addAll(subtractRanges(
+                                Math.max(range.getStart().seq(), watermark + 1),
+                                Math.min(range.getEnd().seq(), highest), covered));
+                    }
+                    seen.add(range);
+                    highest = Math.max(highest, range.getEnd().seq());
+                }
+            });
+        });
+        result.values().removeIf(List::isEmpty);
+        return result;
+    }
+
+    /** Subtract sorted, disjoint sequence intervals without enumerating individual messages. */
+    private static List<Pair<Long, Long>> subtractRanges(long start, long end, List<Pair<Long, Long>> covered) {
+        List<Pair<Long, Long>> missing = new ArrayList<>();
+        if (start > end) {
+            return missing;
+        }
+        for (Pair<Long, Long> previous : covered) {
+            if (previous.getRight() < start) {
+                continue;
+            }
+            if (previous.getLeft() > end) {
+                break;
+            }
+            if (previous.getLeft() > start) {
+                missing.add(Pair.of(start, previous.getLeft() - 1));
+            }
+            if (previous.getRight() >= end) {
+                return missing;
+            }
+            start = Math.max(start, previous.getRight() + 1);
+        }
+        missing.add(Pair.of(start, end));
+        return missing;
+    }
+
+    /** Keep unique inclusive violations across repeated calculations and verified-watermark trimming. */
+    public synchronized void mergeOutOfOrderSeqs(Map<String, List<Pair<Long, Long>>> incoming) {
+        Map<String, List<Pair<Long, Long>>> merged = new HashMap<>(outOfOrderSeqs);
+        incoming.forEach((key, values) -> {
+            List<Pair<Long, Long>> sorted = new ArrayList<>(merged.getOrDefault(key, List.of()));
+            sorted.addAll(values);
+            sorted.sort(java.util.Comparator.comparingLong(Pair::getLeft));
+            List<Pair<Long, Long>> compact = new ArrayList<>();
+            for (Pair<Long, Long> range : sorted) {
+                if (!compact.isEmpty() && (range.getLeft() <= compact.getLast().getRight()
+                        || compact.getLast().getRight() != Long.MAX_VALUE
+                        && range.getLeft() == compact.getLast().getRight() + 1)) {
+                    Pair<Long, Long> last = compact.removeLast();
+                    compact.add(Pair.of(last.getLeft(), Math.max(last.getRight(), range.getRight())));
+                } else {
+                    compact.add(range);
+                }
+            }
+            merged.put(key, compact);
+        });
+        outOfOrderSeqs = merged;
     }
 
     /**

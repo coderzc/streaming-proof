@@ -47,7 +47,7 @@ Here is the example to show the proof status:
 
 - **verified**: Total number of messages successfully verified
 - **errors**: Number of failures during message publication
-- **outOfOrders**: Number of messages received out of sequence
+- **outOfOrders**: Number of sequence numbers with a confirmed sequence/log-position inversion
 - **missed**: Number of messages not received for verification
 - **duplicates**: Number of duplicate messages detected
 - **timeouts**: Number of verification attempts that exceeded the configured timeout period
@@ -55,6 +55,14 @@ Here is the example to show the proof status:
 - **maxVerifiedStallSeconds**: Peak verification stall observed during the run, in seconds; retained across recoveries and frozen at completion
 
 The checkpoints section provides detailed information about the verification status of each message key, allowing you to track the progress and health of your streaming system at a granular level.
+
+**Ordering verification scope**
+
+With the `ordering` feature, the coordinator compares per-key sequence ranges in comparable log-position order within each partition/log. Verified-prefix replays do not create new violations; confirmed intervals remain counted after watermark trimming. `outOfOrderSeqs` contains inclusive sequence intervals, serialized as single-entry objects: `{"key": [{"145": 149}]}` means sequences 145 through 149.
+
+This checks publication/log-position consistency, not consumer callback or dispatch order across workers. In particular, it does not prove Key_Shared handoff order or scalable child-before-parent dispatch order. MQTT uses synthetic positions (`offset = seq`), so this check cannot detect MQTT ordering inversions. Shared subscriptions and proofs without `ordering` do not assert ordering in the summary or top-level details.
+
+The existing `writeDupsOrOutOrder` collection combines duplicate-write candidates and late arrivals; its write-duplicate totals are not independent evidence that an inversion was also a duplicate write.
 
 **Detecting stalled verification**
 

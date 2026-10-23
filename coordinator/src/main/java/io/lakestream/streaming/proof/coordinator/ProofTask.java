@@ -764,17 +764,24 @@ public class ProofTask {
     Pair<ProducerCheckpoint, ConsumerCheckPoint> aggregateCheckpoints() {
         ProducerCheckpoint aggregatedProducerCheckpoint = new ProducerCheckpoint();
         ConsumerCheckPoint aggregatedConsumerCheckpoint = new ConsumerCheckPoint();
+        Map<String, Long> requestWatermarks = Map.copyOf(highWatermarks);
+        aggregatedConsumerCheckpoint.setOrderingWatermarks(requestWatermarks);
         for (WorkerHttpClient client : clients) {
             try {
                 ProducerCheckpoint producerCheckpoint = client.producerCheckpoint(proof.getId()).join();
                 aggregatedProducerCheckpoint.merge(producerCheckpoint);
                 ConsumerCheckPoint consumerCheckpoint = client.consumerCheckpoint(proof.getId(),
-                        highWatermarks).join();
+                        requestWatermarks).join();
                 aggregatedConsumerCheckpoint.merge(consumerCheckpoint);
             } catch (Exception e) {
                 throw new RuntimeException(e);
             }
         }
+        // Order evidence must survive snapshot replacement, even when delivery verification is stalled.
+        aggregatedConsumerCheckpoint.calculate();
+        aggregatedConsumerCheckpoint.mergeOutOfOrderSeqs(latestConsumerCheckpoint.getOutOfOrderSeqs());
+        aggregatedConsumerCheckpoint.mergeOutOfOrderSeqs(lastVerifiedConsumerCheckpoint.getOutOfOrderSeqs());
+        lastVerifiedConsumerCheckpoint.mergeOutOfOrderSeqs(aggregatedConsumerCheckpoint.getOutOfOrderSeqs());
         return Pair.of(aggregatedProducerCheckpoint, aggregatedConsumerCheckpoint);
     }
 
@@ -863,11 +870,11 @@ public class ProofTask {
         return new ProofSummary(
                 verified,
                 countProducerErrors(this.getLastVerifiedProducerCheckpoint()),
-                lastVerifiedConsumerCheckpoint.getOutOfOrderSeqs().values().stream()
-                        .flatMap(ranges -> ranges.stream()
-                                .map(range -> range.getRight() - range.getLeft() + 1))
-                        .mapToInt(Long::intValue)
-                        .sum(),
+                proof.getFeatures() != null && proof.getFeatures().contains("ordering")
+                        ? lastVerifiedConsumerCheckpoint.getOutOfOrderSeqs().values().stream()
+                                .flatMap(ranges -> ranges.stream()
+                                        .map(range -> range.getRight() - range.getLeft() + 1))
+                                .mapToInt(Long::intValue).sum() : 0,
                 lastVerifiedConsumerCheckpoint.getMissedSeqs().values().stream()
                         .flatMap(ranges -> ranges.stream()
                                 .map(range -> range.getEnd().seq() - range.getStart().seq() - 1))
@@ -931,7 +938,9 @@ public class ProofTask {
                 checkpoints,
                 failedKeys,
                 lastVerifiedConsumerCheckpoint.getMissedSeqs(),
-                lastVerifiedConsumerCheckpoint.getOutOfOrderSeqs(),
+                !sharedMode && proof.getFeatures() != null
+                        && proof.getFeatures().contains("ordering")
+                        ? lastVerifiedConsumerCheckpoint.getOutOfOrderSeqs() : Map.of(),
                 lastVerifiedConsumerCheckpoint.getWriteDuplicatesSeqs());
     }
 

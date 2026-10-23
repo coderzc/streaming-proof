@@ -16,8 +16,10 @@ package io.lakestream.streaming.proof.common;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.ObjectWriter;
+import com.fasterxml.jackson.databind.module.SimpleModule;
 import java.util.Set;
 import lombok.experimental.UtilityClass;
+import org.apache.commons.lang3.tuple.Pair;
 
 /**
  * Utility class providing common functionality for the streaming proof system.
@@ -36,6 +38,7 @@ public class Util {
      * instead of throwing exceptions.
      */
     public static final ObjectMapper JSON_MAPPER = new ObjectMapper()
+            .registerModule(new SimpleModule().addDeserializer(Pair.class, new PairDeserializer()))
             .configure(DeserializationFeature.READ_UNKNOWN_ENUM_VALUES_USING_DEFAULT_VALUE, true);
 
     /**
