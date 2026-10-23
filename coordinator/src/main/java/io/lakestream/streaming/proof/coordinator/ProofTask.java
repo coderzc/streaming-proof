@@ -50,6 +50,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -648,8 +649,8 @@ public class ProofTask {
             checkPointInCheckTimeStamps = System.currentTimeMillis();
         } else if (Duration.ofMillis(System.currentTimeMillis() - checkPointInCheckTimeStamps)
                 .compareTo(Duration.ofSeconds(proof.getTimeout())) > 0) {
-            log.error("[{}] shared checkpoint verify failed: {}", proof.getId(), getSummary());
             failed = true;
+            log.error("[{}] shared checkpoint verify failed: {}", proof.getId(), getSummary());
             lastFailedProducerCheckpoint = inCheck;
             lastFailedConsumerCheckpoint = latestConsumerCheckpoint;
             timeouts++;
@@ -757,6 +758,7 @@ public class ProofTask {
                 return;
             }
         }
+        failed = true;
         log.warn("[{}] Final verification: consumers did not catch up within {} seconds",
                 proof.getId(), maxRetries);
     }
@@ -821,11 +823,11 @@ public class ProofTask {
 
     /**
      * Wall-clock seconds since the verified count last increased. While the run
-     * is active this grows with the clock; once stopped it is frozen at the
-     * completion time so historical reports stay stable.
+     * is verifying this grows with the clock; once the final verification is done
+     * it is frozen at the completion time so historical reports stay stable.
      */
     private long computeVerifiedStallSeconds() {
-        long end = running.get() ? System.currentTimeMillis() : completionMillis;
+        long end = running.get() && completionMillis == 0 ? System.currentTimeMillis() : completionMillis;
         return Math.max(0L, (end - lastVerifiedChangeMillis) / 1000);
     }
 
@@ -834,7 +836,7 @@ public class ProofTask {
      * peak so the value is correct between ticks, and is frozen at completion.
      */
     private long computeMaxVerifiedStallSeconds() {
-        long end = running.get() ? System.currentTimeMillis() : completionMillis;
+        long end = running.get() && completionMillis == 0 ? System.currentTimeMillis() : completionMillis;
         long liveStallMillis = end - lastVerifiedChangeMillis;
         return Math.max(0L, Math.max(maxVerifiedStallMillis, liveStallMillis)) / 1000;
     }
@@ -853,11 +855,7 @@ public class ProofTask {
                     verified,
                     countProducerErrors(this.getLastVerifiedProducerCheckpoint()),
                     0, // out-of-order: not applicable for Shared
-                    cp.getMissedSeqs().values().stream()
-                            .flatMap(ranges -> ranges.stream()
-                                    .map(range -> range.getEnd().seq() - range.getStart().seq() - 1))
-                            .mapToInt(Long::intValue)
-                            .sum(),
+                    countSharedMissed(),
                     cp.getDuplicatedCount().values().stream().reduce(0L, Long::sum),
                     0, // write duplicates: not tracked in shared mode
                     this.getTimeouts(),
@@ -889,6 +887,23 @@ public class ProofTask {
                 this.getTimeouts(),
                 computeVerifiedStallSeconds(),
                 computeMaxVerifiedStallSeconds());
+    }
+
+    /**
+     * Shared consumers receive a key's messages in any order, so a gap is normally a message still on its
+     * way to another consumer. A message only counts as missed once the in-check checkpoint covering it
+     * failed verification and it is still not consumed.
+     */
+    private int countSharedMissed() {
+        if (!failed) {
+            return 0;
+        }
+        long missed = inCheck.getPublished().entrySet().stream()
+                .mapToLong(entry -> latestConsumerCheckpoint.countUnconsumed(entry.getKey(),
+                        highWatermarks.getOrDefault(entry.getKey(), -1L), entry.getValue().seq()))
+                .sum();
+        // Clamp: a count wrapped to a negative int would let the run pass
+        return (int) Math.min(missed, Integer.MAX_VALUE);
     }
 
     /**
@@ -950,14 +965,19 @@ public class ProofTask {
      * @return A compact report view of the proof run
      */
     public ProofReport getReport() {
+        return buildReport(false);
+    }
+
+    /** Builds a terminal result for notifications without ending the cleanup lifecycle. */
+    private ProofReport buildReport(boolean finalResult) {
         ProofSummary summary = getSummary();
-        ProofPerformanceSummary performanceSummary = running.get()
+        ProofPerformanceSummary performanceSummary = running.get() && !finalResult
                 ? buildPerformanceSummary(summary)
                 : latestPerformanceSummary != null
                         ? latestPerformanceSummary
                         : buildPerformanceSummary(summary);
-        String status = determineResultStatus(summary, performanceSummary);
-        String resultReason = determineResultReason(summary, performanceSummary, status);
+        String status = determineResultStatus(summary, performanceSummary, finalResult);
+        String resultReason = determineResultReason(summary, performanceSummary, status, finalResult);
         // Append a trailing point that extends the chart to the current elapsed time.
         // Reuse the last windowed point's rates and latency so the chart stays flat
         // instead of snapping to the cumulative average.  Only the absolute counters
@@ -1153,11 +1173,12 @@ public class ProofTask {
                 buildLatencySummary(workerMetrics.endToEndLatency()));
     }
 
-    private String determineResultStatus(ProofSummary summary, ProofPerformanceSummary performanceSummary) {
+    private String determineResultStatus(
+            ProofSummary summary, ProofPerformanceSummary performanceSummary, boolean finalResult) {
         if (startFailureReason != null) {
             return "failed";
         }
-        if (running.get()) {
+        if (running.get() && !finalResult) {
             return stopping.get() ? "stopping" : "running";
         }
         if (manuallyStopped.get()) {
@@ -1174,11 +1195,12 @@ public class ProofTask {
     }
 
     private String determineResultReason(
-            ProofSummary summary, ProofPerformanceSummary performanceSummary, String resultStatus) {
+            ProofSummary summary, ProofPerformanceSummary performanceSummary,
+            String resultStatus, boolean finalResult) {
         if (startFailureReason != null) {
             return "The run failed to start: " + startFailureReason;
         }
-        if (running.get()) {
+        if (running.get() && !finalResult) {
             if (stopping.get()) {
                 return "Stop requested. Final verification is still in progress.";
             }
@@ -1483,11 +1505,12 @@ public class ProofTask {
      * Sends webhook notification when proof test completes with results.
      *
      * @param report The final proof report
+     * @return A future that completes once the notification is sent or failed, never exceptionally
      */
-    public void sendCompletionNotification(ProofReport report) {
+    public CompletableFuture<Void> sendCompletionNotification(ProofReport report) {
         if (proof.getWebhookConfig() != null && proof.getWebhookConfig().isEnabled()) {
             try {
-                webhookService.sendProofCompletionNotification(report)
+                return webhookService.sendProofCompletionNotification(report)
                         .handle((result, throwable) -> {
                             if (throwable != null) {
                                 log.error("Failed to send completion webhook notification for proof {}",
@@ -1497,12 +1520,13 @@ public class ProofTask {
                                         proof.getId());
                             }
                             return null;
-                        }).join();
+                        });
             } catch (Exception e) {
                 log.error("Error sending completion webhook notification for proof {}",
                         proof.getId(), e);
             }
         }
+        return CompletableFuture.completedFuture(null);
     }
 
     /**
@@ -1532,17 +1556,23 @@ public class ProofTask {
         // consumers are still active, capturing every published message.
         runFinalVerification();
 
-        // Freeze verification timing before notification delivery and cleanup.
-        completionMillis = System.currentTimeMillis();
-        running.set(false);
-
         // Record a final time-series point so the chart reflects the
         // fully-verified state after all consumers have caught up.
         recordTimeSeriesPoint();
 
+        // Verification ends here: stopping consumers and notifying must not count as a stall
+        completionMillis = System.currentTimeMillis();
+
         // Build the final performance snapshot after verification has
         // settled, while worker metrics are still available.
         latestPerformanceSummary = buildPerformanceSummary(getSummary());
+
+        // Notify after final verification, so the webhook carries the final result. Wait for it
+        // before removing consumers, so reports during the wait still read their metrics, and
+        // before closing the webhook client, which would abort it.
+        if (completionHandled.get() && !manuallyStopped.get()) {
+            sendCompletionNotification(buildReport(true)).join();
+        }
 
         clients.forEach(client -> {
             try {
@@ -1552,14 +1582,12 @@ public class ProofTask {
             }
         });
 
-        // Use the final report and finish sending before closing the HTTP client.
-        if (completionHandled.get() && !manuallyStopped.get()) {
-            sendCompletionNotification(getReport());
-        }
         if (webhookService != null) {
             webhookService.close();
         }
 
+        // Keep the UI in stopping until consumer cleanup and notification are complete.
+        running.set(false);
         log.info("ProofTask {} stopped", proof.getId());
     }
 }
