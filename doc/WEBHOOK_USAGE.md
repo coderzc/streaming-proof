@@ -109,7 +109,7 @@ status and result reason, including failures caused by the verification stall li
 **Start Time:** 2024-01-15T10:30:00
 **Completion Time:** 2024-01-15T11:30:00
 
-Status: passed
+Status: ✅ passed
 Reason: The run completed without missed or out-of-order messages.
 ```
 

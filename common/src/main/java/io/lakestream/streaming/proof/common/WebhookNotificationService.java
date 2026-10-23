@@ -189,7 +189,12 @@ public class WebhookNotificationService {
         }
         message.append("\n");
         
-        message.append("Status: ").append(report.status()).append("\n");
+        String statusPrefix = switch (report.status()) {
+            case "passed" -> "✅ ";
+            case "failed" -> "❌ ";
+            default -> "";
+        };
+        message.append("Status: ").append(statusPrefix).append(report.status()).append("\n");
         if (report.resultReason() != null) {
             message.append("Reason: ").append(report.resultReason()).append("\n");
         }
