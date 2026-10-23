@@ -778,6 +778,12 @@ public class ProofTaskTest {
             assertEquals(report.status(), task.getReport().status());
             assertEquals(report.resultReason(), task.getReport().resultReason());
             assertEquals(report.summary(), task.getReport().summary());
+            assertNotNull(report.completionTime());
+            Field completionMillis = ProofTask.class.getDeclaredField("completionMillis");
+            completionMillis.setAccessible(true);
+            assertEquals(report.completionTime(), java.time.Instant.ofEpochMilli(completionMillis.getLong(task))
+                    .atZone(java.time.ZoneId.systemDefault()).toLocalDateTime()
+                    .format(DateTimeFormatter.ISO_LOCAL_DATE_TIME));
         } finally {
             task.getExecutor().shutdownNow();
         }
@@ -823,6 +829,7 @@ public class ProofTaskTest {
             Thread.sleep(2200);
             assertEquals(task.getReport().status(), "passed");
             assertEquals(task.getReport().summary(), notified.get().summary());
+            assertEquals(task.getReport().completionTime(), notified.get().completionTime());
 
             delivery.complete(null);
             completion.get(10, TimeUnit.SECONDS);

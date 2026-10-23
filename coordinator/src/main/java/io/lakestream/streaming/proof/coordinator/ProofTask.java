@@ -1003,7 +1003,10 @@ public class ProofTask {
                         countProducerKeys(lastFailedProducerCheckpoint),
                         countConsumerKeys(lastFailedConsumerCheckpoint)),
                 performanceSummary,
-                List.copyOf(reportTimeSeries));
+                List.copyOf(reportTimeSeries),
+                completionMillis > 0 ? java.time.Instant.ofEpochMilli(completionMillis)
+                        .atZone(java.time.ZoneId.systemDefault()).toLocalDateTime()
+                        .format(DateTimeFormatter.ISO_LOCAL_DATE_TIME) : null);
     }
 
     private List<ProofClusterTarget> resolveClusterTargets() {

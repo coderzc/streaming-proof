@@ -184,9 +184,10 @@ public class WebhookNotificationService {
         message.append("Topic: ").append(proof.getTopic()).append("\n");
         message.append("Duration: ").append(proof.getDuration()).append(" seconds\n");
         message.append("Start Time: ").append(proof.getStartTime()).append("\n");
-        message.append("Completion Time: ")
-                .append(LocalDateTime.now().format(DateTimeFormatter.ISO_LOCAL_DATE_TIME))
-                .append("\n\n");
+        if (report.completionTime() != null) {
+            message.append("Completion Time: ").append(report.completionTime()).append("\n");
+        }
+        message.append("\n");
         
         message.append("Status: ").append(report.status()).append("\n");
         if (report.resultReason() != null) {

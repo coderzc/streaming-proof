@@ -96,6 +96,8 @@ When a proof test reaches its configured duration, a notification like this will
 When a proof test completes with results, the notification uses the final `ProofReport`
 status and result reason, including failures caused by the verification stall limit:
 
+`Completion Time` is the report's recorded completion time, rather than the time the webhook is sent.
+
 ```
 🎯 **Streaming Proof Test Completed**
 

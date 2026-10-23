@@ -109,7 +109,8 @@ class WebhookNotificationServiceTest {
         when(mockResponse.getStatusCode()).thenReturn(200);
 
         // Act
-        ProofReport report = new ProofReport(proof, status, reason, null, summary, null, null, null);
+        String completionTime = "2026-10-23T10:00:00";
+        ProofReport report = new ProofReport(proof, status, reason, null, summary, null, null, null, completionTime);
         CompletableFuture<Void> result = webhookService.sendProofCompletionNotification(report);
 
         // Assert
@@ -121,6 +122,7 @@ class WebhookNotificationServiceTest {
         assertTrue(message.contains("Status: " + status + "\n"));
         assertTrue(message.contains("Reason: " + reason + "\n"));
         assertTrue(message.contains("Verified: 1000\n"));
+        assertTrue(message.contains("Completion Time: " + completionTime + "\n"));
     }
 
     @Test
