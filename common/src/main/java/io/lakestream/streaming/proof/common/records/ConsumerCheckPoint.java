@@ -189,6 +189,9 @@ public class ConsumerCheckPoint {
     private volatile Map<String, Long> duplicatedCount = Collections.emptyMap();
     /** Map storing out-of-order sequence ranges for each key */
     private volatile Map<String, List<Pair<Long, Long>>> outOfOrderSeqs = Collections.emptyMap();
+    /** Verified prefix used for this coordinator snapshot, retained across recalculation. */
+    @JsonIgnore
+    private Map<String, Long> orderingWatermarks = Collections.emptyMap();
     /** Map storing write duplicates sequence ranges from producer for each key */
     private volatile Map<String, List<SeqRange>> writeDuplicatesSeqs = Collections.emptyMap();
 
@@ -339,8 +342,12 @@ public class ConsumerCheckPoint {
                 for (SeqRange range : ordered) {
                     List<Pair<Long, Long>> covered = trim(seen).stream()
                             .map(previous -> Pair.of(previous.getStart().seq(), previous.getEnd().seq())).toList();
-                    result.computeIfAbsent(key, ignored -> new ArrayList<>()).addAll(subtractRanges(
-                            range.getStart().seq(), Math.min(range.getEnd().seq(), highest), covered));
+                    long watermark = orderingWatermarks.getOrDefault(key, -1L);
+                    if (watermark < Long.MAX_VALUE) {
+                        result.computeIfAbsent(key, ignored -> new ArrayList<>()).addAll(subtractRanges(
+                                Math.max(range.getStart().seq(), watermark + 1),
+                                Math.min(range.getEnd().seq(), highest), covered));
+                    }
                     seen.add(range);
                     highest = Math.max(highest, range.getEnd().seq());
                 }

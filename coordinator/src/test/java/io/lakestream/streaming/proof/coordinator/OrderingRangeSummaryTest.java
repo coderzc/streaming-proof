@@ -17,6 +17,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 import static org.testng.Assert.assertEquals;
+import static org.testng.Assert.assertTrue;
 
 import io.lakestream.streaming.proof.common.LongSeq;
 import io.lakestream.streaming.proof.common.MessageMetadata;
@@ -40,6 +41,42 @@ public class OrderingRangeSummaryTest {
             task.getLastVerifiedConsumerCheckpoint().mergeOutOfOrderSeqs(
                     Map.of("key", List.of(org.apache.commons.lang3.tuple.Pair.of(1L, 1L))));
             assertEquals(task.getSummary().outOfOrders(), 0);
+            assertTrue(task.getDetails().outOfOrderSeqs().isEmpty());
+            assertEquals(task.getReport().status(), "passed");
+        } finally {
+            task.getExecutor().shutdownNow();
+        }
+    }
+
+    @Test
+    public void requestWatermarkExcludesVerifiedReplayFromPermanentEvidence() throws Exception {
+        Proof proof = Proof.builder().id("proof").features(List.of("at_least_once", "ordering")).build();
+        ProofTask task = new ProofTask(proof, new Configs(Map.of(), Map.of()), mock(ProofDriver.class));
+        WorkerHttpClient client = mock(WorkerHttpClient.class);
+        task.getClients().add(client);
+        Map<String, Long> watermarks = task.getHighWatermarks();
+        watermarks.put("key", 1L);
+        ConsumerCheckPoint cp = new ConsumerCheckPoint();
+        var clipped = new ConsumerCheckPoint.SeqRange();
+        clipped.setStart(new LongSeq(2L, new MessageMetadata(0L)));
+        clipped.setEnd(new LongSeq(2L, new MessageMetadata(2L)));
+        var replay = new ConsumerCheckPoint.SeqRange();
+        replay.setStart(new LongSeq(1L, new MessageMetadata(1L)));
+        replay.setEnd(replay.getStart());
+        cp.addKey("key", Map.of("clipped", clipped, "replay", replay));
+        when(client.producerCheckpoint(any())).thenReturn(CompletableFuture.completedFuture(new ProducerCheckpoint()));
+        when(client.consumerCheckpoint(any(), any())).thenReturn(CompletableFuture.completedFuture(cp),
+                CompletableFuture.completedFuture(new ConsumerCheckPoint()));
+        try {
+            ConsumerCheckPoint snapshot = task.aggregateCheckpoints().getRight();
+            assertTrue(snapshot.getOutOfOrderSeqs().isEmpty());
+            var verified = ProofTask.class.getDeclaredField("lastVerifiedConsumerCheckpoint");
+            verified.setAccessible(true);
+            verified.set(task, snapshot);
+            watermarks.clear(); // A later coordinator update must not change the snapshot's base.
+            assertEquals(task.getSummary().outOfOrders(), 0);
+            assertTrue(task.getDetails().outOfOrderSeqs().isEmpty());
+            task.setLatestConsumerCheckpoint(task.aggregateCheckpoints().getRight());
             assertEquals(task.getReport().status(), "passed");
         } finally {
             task.getExecutor().shutdownNow();

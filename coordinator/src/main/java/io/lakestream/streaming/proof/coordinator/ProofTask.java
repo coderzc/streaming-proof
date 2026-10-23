@@ -764,12 +764,14 @@ public class ProofTask {
     Pair<ProducerCheckpoint, ConsumerCheckPoint> aggregateCheckpoints() {
         ProducerCheckpoint aggregatedProducerCheckpoint = new ProducerCheckpoint();
         ConsumerCheckPoint aggregatedConsumerCheckpoint = new ConsumerCheckPoint();
+        Map<String, Long> requestWatermarks = Map.copyOf(highWatermarks);
+        aggregatedConsumerCheckpoint.setOrderingWatermarks(requestWatermarks);
         for (WorkerHttpClient client : clients) {
             try {
                 ProducerCheckpoint producerCheckpoint = client.producerCheckpoint(proof.getId()).join();
                 aggregatedProducerCheckpoint.merge(producerCheckpoint);
                 ConsumerCheckPoint consumerCheckpoint = client.consumerCheckpoint(proof.getId(),
-                        highWatermarks).join();
+                        requestWatermarks).join();
                 aggregatedConsumerCheckpoint.merge(consumerCheckpoint);
             } catch (Exception e) {
                 throw new RuntimeException(e);
@@ -936,7 +938,8 @@ public class ProofTask {
                 checkpoints,
                 failedKeys,
                 lastVerifiedConsumerCheckpoint.getMissedSeqs(),
-                lastVerifiedConsumerCheckpoint.getOutOfOrderSeqs(),
+                !sharedMode && proof.getFeatures().contains("ordering")
+                        ? lastVerifiedConsumerCheckpoint.getOutOfOrderSeqs() : Map.of(),
                 lastVerifiedConsumerCheckpoint.getWriteDuplicatesSeqs());
     }
 

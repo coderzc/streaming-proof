@@ -76,6 +76,34 @@ public class OrderingRangeCheckpointTest {
         assertTrue(checkpoint(task).getOutOfOrderSeqs().isEmpty());
     }
 
+    @Test
+    public void verifiedReplayBetweenTrimmingAndSnapshotIsNotAnInversion() throws Exception {
+        ProofConsumerTask task = new ProofConsumerTask();
+        task.setConsumer(mock(ProofConsumer.class));
+        for (long seq = 0; seq <= 2; seq++) {
+            task.onMessage("key", seq, new MessageMetadata(seq));
+        }
+        task.applyHighWatermarks(Map.of("key", 1L));
+        Thread.sleep(2);
+        task.onMessage("key", 1, new MessageMetadata(1L));
+        ConsumerCheckPoint cp = new ConsumerCheckPoint();
+        task.getTrimmedConsumed().forEach(cp::addKey);
+        cp.setOrderingWatermarks(Map.of("key", 1L));
+        cp.calculate();
+        assertTrue(cp.getOutOfOrderSeqs().isEmpty());
+        cp.calculate();
+        assertTrue(cp.getOutOfOrderSeqs().isEmpty());
+        Thread.sleep(2);
+        task.onMessage("key", 4, new MessageMetadata(3L));
+        Thread.sleep(2);
+        task.onMessage("key", 3, new MessageMetadata(4L));
+        ConsumerCheckPoint next = new ConsumerCheckPoint();
+        task.getTrimmedConsumed().forEach(next::addKey);
+        next.setOrderingWatermarks(Map.of("key", 1L));
+        next.calculate();
+        assertEquals(next.getOutOfOrderSeqs().get("key"), List.of(Pair.of(3L, 3L)));
+    }
+
     private static ConsumerCheckPoint checkpoint(ProofConsumerTask task) throws Exception {
         ConsumerCheckPoint cp = new ConsumerCheckPoint();
         task.getTrimmedConsumed().forEach(cp::addKey);

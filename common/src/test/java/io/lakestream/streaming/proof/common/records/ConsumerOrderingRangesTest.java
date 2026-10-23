@@ -143,6 +143,19 @@ public class ConsumerOrderingRangesTest {
                 List.of(Pair.of(Long.MAX_VALUE - 1, Long.MAX_VALUE - 1)));
     }
 
+    @Test
+    public void maximumWatermarkAndConfirmedEvidenceSurviveRecalculation() {
+        ConsumerCheckPoint cp = new ConsumerCheckPoint();
+        add(cp, "high", Long.MAX_VALUE, Long.MAX_VALUE, 0L, 0L);
+        add(cp, "low", Long.MAX_VALUE - 1, Long.MAX_VALUE - 1, 1L, 1L);
+        cp.setOrderingWatermarks(Map.of("key", Long.MAX_VALUE));
+        cp.calculate();
+        assertTrue(cp.getOutOfOrderSeqs().isEmpty());
+        cp.mergeOutOfOrderSeqs(Map.of("key", List.of(Pair.of(1L, 1L))));
+        cp.calculate();
+        assertEquals(cp.getOutOfOrderSeqs().get("key"), List.of(Pair.of(1L, 1L)));
+    }
+
     private static void add(ConsumerCheckPoint cp, String timestamp, long start, long end, long first, long last) {
         cp.addKey("key", Map.of(timestamp, range(start, end, first, last)));
     }
