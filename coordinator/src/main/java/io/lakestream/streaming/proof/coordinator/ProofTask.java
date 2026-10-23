@@ -493,11 +493,12 @@ public class ProofTask {
      * across all available workers.
      */
     private void startProducers() {
-        int workerCount = clients.size();
         // Distribute producers to workers
         int totalProducers = proof.getProducers();
         int totalKeys = proof.getKeys();
         int totalMsgRate = proof.getMsgRate();
+        int workerCount = Math.min(clients.size(),
+                Math.min(totalProducers, Math.min(totalKeys, totalMsgRate)));
 
         // Calculate base values per worker
         int baseProducersPerWorker = totalProducers / workerCount;
@@ -507,7 +508,7 @@ public class ProofTask {
         int baseMsgRatePerWorker = totalMsgRate / workerCount;
         int msgRateRemainder = totalMsgRate % workerCount;
         String driverName = proof.getDrivers() == null ? proof.getDriver() : proof.getDrivers().producer();
-        for (int i = 0; i < clients.size(); i++) {
+        for (int i = 0; i < workerCount; i++) {
             int producerCount = baseProducersPerWorker + (i == workerCount - 1 ? producerRemainder : 0);
             int keyCount = baseKeysPerWorker + (i == workerCount - 1 ? keysRemainder : 0);
             int msgRate = baseMsgRatePerWorker + (i == workerCount - 1 ? msgRateRemainder : 0);
