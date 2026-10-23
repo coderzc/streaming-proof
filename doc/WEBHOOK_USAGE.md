@@ -93,7 +93,8 @@ When a proof test reaches its configured duration, a notification like this will
 
 ### Test Completion Notification
 
-When a proof test completes with results, a notification like this will be sent:
+When a proof test completes with results, the notification uses the final `ProofReport`
+status and result reason, including failures caused by the verification stall limit:
 
 ```
 🎯 **Streaming Proof Test Completed**
@@ -106,8 +107,8 @@ When a proof test completes with results, a notification like this will be sent:
 **Start Time:** 2024-01-15T10:30:00
 **Completion Time:** 2024-01-15T11:30:00
 
-**Status:** ✅ SUCCESS
-**Details:** All messages verified successfully
+Status: passed
+Reason: The run completed without missed or out-of-order messages.
 ```
 
 ## API Examples
@@ -187,7 +188,8 @@ curl -X POST http://localhost:8080/proof \
 ## Error Handling
 
 - If webhook delivery fails, the error will be logged but won't affect the proof test execution
-- Webhook notifications are sent asynchronously and won't block the test
+- Completion notifications use the final report after verification finishes. Shutdown waits for
+  delivery to complete or fail before closing the webhook client; this wait does not affect the test result.
 - Invalid webhook configurations will be logged as warnings
 
 ## Implementation Details

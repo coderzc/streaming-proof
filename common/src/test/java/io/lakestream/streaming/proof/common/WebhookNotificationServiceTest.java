@@ -22,6 +22,7 @@ import static org.testng.Assert.assertNotNull;
 import static org.testng.Assert.assertTrue;
 
 import io.lakestream.streaming.proof.common.records.Proof;
+import io.lakestream.streaming.proof.common.records.ProofReport;
 import io.lakestream.streaming.proof.common.records.ProofSummary;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
@@ -31,9 +32,11 @@ import org.asynchttpclient.BoundRequestBuilder;
 import org.asynchttpclient.ListenableFuture;
 import org.asynchttpclient.Request;
 import org.asynchttpclient.Response;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.MockitoAnnotations;
 import org.testng.annotations.BeforeMethod;
+import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
 /**
@@ -61,8 +64,17 @@ class WebhookNotificationServiceTest {
         webhookService = new WebhookNotificationService(mockHttpClient);
     }
 
-    @Test
-    void testSendProofCompletionNotification_WithValidSlackWebhook() throws Exception {
+    @DataProvider
+    Object[][] completionResults() {
+        return new Object[][] {
+                {"passed", "The run completed without missed or out-of-order messages."},
+                {"failed", "Verification stalled for 20s, exceeding the configured limit of 10s."},
+                {"stopped", "The run was stopped manually."}
+        };
+    }
+
+    @Test(dataProvider = "completionResults")
+    void testSendProofCompletionNotification_UsesReportResult(String status, String reason) throws Exception {
         // Arrange
         WebhookConfig webhookConfig = WebhookConfig.builder()
                 .url("https://hooks.slack.com/test")
@@ -97,11 +109,18 @@ class WebhookNotificationServiceTest {
         when(mockResponse.getStatusCode()).thenReturn(200);
 
         // Act
-        CompletableFuture<Void> result = webhookService.sendProofCompletionNotification(proof, summary);
+        ProofReport report = new ProofReport(proof, status, reason, null, summary, null, null, null);
+        CompletableFuture<Void> result = webhookService.sendProofCompletionNotification(report);
 
         // Assert
         assertNotNull(result);
-        verify(mockHttpClient).executeRequest(any(Request.class));
+        ArgumentCaptor<Request> request = ArgumentCaptor.forClass(Request.class);
+        verify(mockHttpClient).executeRequest(request.capture());
+        String message = Util.JSON_MAPPER.readTree(request.getValue().getStringData())
+                .path("blocks").get(0).path("text").path("text").asText();
+        assertTrue(message.contains("Status: " + status + "\n"));
+        assertTrue(message.contains("Reason: " + reason + "\n"));
+        assertTrue(message.contains("Verified: 1000\n"));
     }
 
     @Test

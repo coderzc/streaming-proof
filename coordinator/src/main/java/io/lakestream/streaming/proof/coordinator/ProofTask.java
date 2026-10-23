@@ -666,7 +666,6 @@ public class ProofTask {
         log.info("Stopping proof task {} after reaching the specified duration of {} seconds",
                 proof.getId(), proof.getDuration());
         recordTimeSeriesPoint();
-        sendCompletionNotification(getSummary());
         stop();
     }
 
@@ -1480,13 +1479,13 @@ public class ProofTask {
     /**
      * Sends webhook notification when proof test completes with results.
      *
-     * @param summary The proof execution summary
+     * @param report The final proof report
      */
-    public void sendCompletionNotification(ProofSummary summary) {
+    public void sendCompletionNotification(ProofReport report) {
         if (proof.getWebhookConfig() != null && proof.getWebhookConfig().isEnabled()) {
             try {
-                webhookService.sendProofCompletionNotification(proof, summary)
-                        .whenComplete((result, throwable) -> {
+                webhookService.sendProofCompletionNotification(report)
+                        .handle((result, throwable) -> {
                             if (throwable != null) {
                                 log.error("Failed to send completion webhook notification for proof {}",
                                         proof.getId(), throwable);
@@ -1494,7 +1493,8 @@ public class ProofTask {
                                 log.info("Successfully sent completion webhook notification for proof {}",
                                         proof.getId());
                             }
-                        });
+                            return null;
+                        }).join();
             } catch (Exception e) {
                 log.error("Error sending completion webhook notification for proof {}",
                         proof.getId(), e);
@@ -1529,6 +1529,10 @@ public class ProofTask {
         // consumers are still active, capturing every published message.
         runFinalVerification();
 
+        // Freeze verification timing before notification delivery and cleanup.
+        completionMillis = System.currentTimeMillis();
+        running.set(false);
+
         // Record a final time-series point so the chart reflects the
         // fully-verified state after all consumers have caught up.
         recordTimeSeriesPoint();
@@ -1545,14 +1549,14 @@ public class ProofTask {
             }
         });
 
+        // Use the final report and finish sending before closing the HTTP client.
+        if (completionHandled.get() && !manuallyStopped.get()) {
+            sendCompletionNotification(getReport());
+        }
         if (webhookService != null) {
             webhookService.close();
         }
 
-        // Mark as stopped only after all cleanup is complete, so the
-        // report API never returns "stopped" with stale data.
-        completionMillis = System.currentTimeMillis();
-        running.set(false);
         log.info("ProofTask {} stopped", proof.getId());
     }
 }

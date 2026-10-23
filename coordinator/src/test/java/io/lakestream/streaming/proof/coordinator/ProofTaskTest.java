@@ -13,6 +13,8 @@
  */
 package io.lakestream.streaming.proof.coordinator;
 
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
@@ -31,6 +33,8 @@ import static org.testng.Assert.fail;
 import io.lakestream.streaming.proof.common.LongSeq;
 import io.lakestream.streaming.proof.common.MessageMetadata;
 import io.lakestream.streaming.proof.common.ProofDriver;
+import io.lakestream.streaming.proof.common.WebhookConfig;
+import io.lakestream.streaming.proof.common.WebhookNotificationService;
 import io.lakestream.streaming.proof.common.records.Configs;
 import io.lakestream.streaming.proof.common.records.ConsumerCheckPoint;
 import io.lakestream.streaming.proof.common.records.Driver;
@@ -51,9 +55,15 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import org.apache.commons.lang3.tuple.Pair;
+import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
+import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
 public class ProofTaskTest {
@@ -634,7 +644,7 @@ public class ProofTaskTest {
                 .timeout(30)
                 .build();
 
-        ProofTask task = new ProofTask(proof, new Configs(Map.of(), Map.of()), driver);
+        ProofTask task = spy(new ProofTask(proof, new Configs(Map.of(), Map.of()), driver));
 
         try {
             getRunningFlag(task).set(true);
@@ -643,6 +653,7 @@ public class ProofTaskTest {
 
             assertEquals(task.getReport().status(), "stopped");
             assertEquals(task.getReport().resultReason(), "The run was stopped manually.");
+            verify(task, never()).sendCompletionNotification(any());
         } finally {
             task.getExecutor().shutdownNow();
         }
@@ -727,6 +738,100 @@ public class ProofTaskTest {
             ProofSummary summary = task.getSummary();
             assertEquals(summary.verified(), 500L);
         } finally {
+            task.getExecutor().shutdownNow();
+        }
+    }
+
+    @DataProvider
+    public Object[][] completionReportResults() {
+        return new Object[][] {{0L, "passed"}, {20_000L, "failed"}};
+    }
+
+    @Test(dataProvider = "completionReportResults")
+    public void testCompletionNotificationUsesFinalReport(long stallMillis, String expectedStatus) throws Exception {
+        Proof proof = Proof.builder().id("test-proof").topic("test-topic")
+                .features(List.of("at_least_once")).finalWaitSeconds(0).maxStallSeconds(10).build();
+        ProofTask task = spy(new ProofTask(proof, new Configs(Map.of(), Map.of()), mock(ProofDriver.class)));
+        try {
+            getRunningFlag(task).set(true);
+            setLongField(task, "lastVerifiedChangeMillis", System.currentTimeMillis() - stallMillis);
+            setLongField(task, "lastVerifiedObserved", 10L);
+            ProducerCheckpoint producerCp = new ProducerCheckpoint();
+            producerCp.addPublished("key0", new LongSeq(9, MessageMetadata.empty()));
+            ConsumerCheckPoint consumerCp = new ConsumerCheckPoint();
+            ConsumerCheckPoint.SeqRange range = new ConsumerCheckPoint.SeqRange();
+            range.setStart(new LongSeq(0, MessageMetadata.empty()));
+            range.setEnd(new LongSeq(9, MessageMetadata.empty()));
+            consumerCp.addKey("key0", Map.of("t0", range));
+            doReturn(Pair.of(producerCp, consumerCp)).when(task).aggregateCheckpoints();
+
+            Method complete = ProofTask.class.getDeclaredMethod("completeProofAfterDuration");
+            complete.setAccessible(true);
+            complete.invoke(task);
+
+            ArgumentCaptor<ProofReport> notification = ArgumentCaptor.forClass(ProofReport.class);
+            verify(task).sendCompletionNotification(notification.capture());
+            ProofReport report = notification.getValue();
+            assertEquals(report.status(), expectedStatus);
+            assertEquals(report.summary().verified(), 10L);
+            assertEquals(report.summary().missed(), 0);
+            assertEquals(report.status(), task.getReport().status());
+            assertEquals(report.resultReason(), task.getReport().resultReason());
+            assertEquals(report.summary(), task.getReport().summary());
+        } finally {
+            task.getExecutor().shutdownNow();
+        }
+    }
+
+    @Test
+    public void testSlowWebhookDoesNotChangeFinalResultAndFinishesBeforeClientCloses() throws Exception {
+        Proof proof = Proof.builder().id("test-proof").topic("test-topic")
+                .features(List.of("at_least_once")).finalWaitSeconds(0).maxStallSeconds(1)
+                .webhookConfig(WebhookConfig.of("https://example.com/webhook")).build();
+        ProofTask task = new ProofTask(proof, new Configs(Map.of(), Map.of()), mock(ProofDriver.class));
+        WebhookNotificationService webhook = mock(WebhookNotificationService.class);
+        Field serviceField = ProofTask.class.getDeclaredField("webhookService");
+        serviceField.setAccessible(true);
+        ((WebhookNotificationService) serviceField.get(task)).close();
+        serviceField.set(task, webhook);
+        CompletableFuture<Void> delivery = new CompletableFuture<>();
+        CountDownLatch sending = new CountDownLatch(1);
+        AtomicReference<ProofReport> notified = new AtomicReference<>();
+        doAnswer(invocation -> {
+            notified.set(invocation.getArgument(0));
+            sending.countDown();
+            return delivery;
+        }).when(webhook).sendProofCompletionNotification(any());
+        CompletableFuture<Void> completion = null;
+        try {
+            getRunningFlag(task).set(true);
+            setLongField(task, "lastVerifiedChangeMillis", System.currentTimeMillis());
+            Method complete = ProofTask.class.getDeclaredMethod("completeProofAfterDuration");
+            complete.setAccessible(true);
+            completion = CompletableFuture.runAsync(() -> {
+                try {
+                    complete.invoke(task);
+                } catch (ReflectiveOperationException e) {
+                    throw new RuntimeException(e);
+                }
+            });
+            assertTrue(sending.await(10, TimeUnit.SECONDS));
+            assertFalse(task.isRunning());
+            assertFalse(completion.isDone());
+            verify(webhook, never()).close();
+            // Cross the stall threshold while notification delivery is pending.
+            Thread.sleep(2200);
+            assertEquals(task.getReport().status(), "passed");
+            assertEquals(task.getReport().summary(), notified.get().summary());
+
+            delivery.complete(null);
+            completion.get(10, TimeUnit.SECONDS);
+            verify(webhook).close();
+        } finally {
+            delivery.complete(null);
+            if (completion != null) {
+                completion.get(10, TimeUnit.SECONDS);
+            }
             task.getExecutor().shutdownNow();
         }
     }
