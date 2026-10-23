@@ -151,6 +151,15 @@ public class Coordinator {
         if (proof.getFinalWaitSeconds() != null && proof.getFinalWaitSeconds() < 0) {
             throw new IllegalArgumentException("Final wait seconds must be 0 or greater.");
         }
+        if (proof.getProducers() < 1) {
+            throw new IllegalArgumentException("Producers must be at least 1.");
+        }
+        if (proof.getKeys() < 1) {
+            throw new IllegalArgumentException("Keys must be at least 1.");
+        }
+        if (proof.getMsgRate() < 1) {
+            throw new IllegalArgumentException("Message rate must be at least 1.");
+        }
         if (proof.getMessageSize() < ProofValue.MIN_SIZE) {
             throw new IllegalArgumentException("Message size must be at least " + ProofValue.MIN_SIZE
                     + " bytes to hold the sequence number, got " + proof.getMessageSize() + ".");
