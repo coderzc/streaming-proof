@@ -13,16 +13,23 @@
  */
 package io.lakestream.streaming.proof.common.records;
 
+import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertFalse;
 import static org.testng.Assert.assertTrue;
 
+import io.lakestream.streaming.proof.common.CoordinatorHttpClient;
 import io.lakestream.streaming.proof.common.LongSeq;
 import io.lakestream.streaming.proof.common.MessageMetadata;
 import io.lakestream.streaming.proof.common.Util;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import org.apache.commons.lang3.tuple.Pair;
+import org.asynchttpclient.AsyncHttpClient;
+import org.asynchttpclient.Response;
 import org.testng.annotations.Test;
 
 public class ConsumerOrderingRangesTest {
@@ -141,6 +148,40 @@ public class ConsumerOrderingRangesTest {
         cp.calculate();
         assertEquals(cp.getOutOfOrderSeqs().get("key"),
                 List.of(Pair.of(Long.MAX_VALUE - 1, Long.MAX_VALUE - 1)));
+    }
+
+    @Test
+    public void nonEmptyOrderingResultsRoundTripIncludingEmbeddedCheckpoints() throws Exception {
+        ConsumerCheckPoint cp = new ConsumerCheckPoint();
+        cp.mergeOutOfOrderSeqs(Map.of("key", List.of(Pair.of(1L, 1L),
+                Pair.of(Long.MAX_VALUE - 1, Long.MAX_VALUE))));
+        var details = new ProofDetails(null, null, new Checkpoints(null, null, cp, null, cp, null, cp),
+                null, null, cp.getOutOfOrderSeqs(), null);
+        var restored = Util.JSON_MAPPER.readValue(Util.JSON_MAPPER.writeValueAsBytes(details), ProofDetails.class);
+        assertEquals(restored.outOfOrderSeqs(), cp.getOutOfOrderSeqs());
+        assertEquals(restored.checkpoints().latestConsumer().getOutOfOrderSeqs(), cp.getOutOfOrderSeqs());
+        assertEquals(restored.checkpoints().verifiedConsumer().getOutOfOrderSeqs(), cp.getOutOfOrderSeqs());
+        assertEquals(restored.checkpoints().failedConsumer().getOutOfOrderSeqs(), cp.getOutOfOrderSeqs());
+    }
+
+    @Test
+    public void javaHttpClientReadsAnActualNonEmptyViolationResponse() throws Exception {
+        ConsumerCheckPoint cp = new ConsumerCheckPoint();
+        add(cp, "a", 0, 0, 0, 0);
+        add(cp, "b", 2, 2, 1, 1);
+        add(cp, "c", 1, 1, 2, 2);
+        cp.calculate();
+        var details = new ProofDetails(null, null, new Checkpoints(null, null, cp, null, cp, null, cp),
+                null, null, cp.getOutOfOrderSeqs(), null);
+        AsyncHttpClient http = mock(AsyncHttpClient.class, RETURNS_DEEP_STUBS);
+        Response response = mock(Response.class);
+        when(response.getStatusCode()).thenReturn(200);
+        when(response.getResponseBody()).thenReturn(Util.JSON_WRITER.writeValueAsString(details));
+        when(http.prepareGet("http://localhost:8080/proofs/proof").execute().toCompletableFuture())
+                .thenReturn(CompletableFuture.completedFuture(response));
+        var restored = new CoordinatorHttpClient(http, "localhost", 8080).getProof("proof").join();
+        assertEquals(restored.outOfOrderSeqs(), Map.of("key", List.of(Pair.of(1L, 1L))));
+        assertEquals(restored.checkpoints().verifiedConsumer().getOutOfOrderSeqs(), restored.outOfOrderSeqs());
     }
 
     @Test
