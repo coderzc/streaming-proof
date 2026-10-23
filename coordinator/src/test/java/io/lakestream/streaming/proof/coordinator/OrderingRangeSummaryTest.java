@@ -49,6 +49,20 @@ public class OrderingRangeSummaryTest {
     }
 
     @Test
+    public void omittedFeaturesDoNotAssertOrderingInSummaryOrDetails() {
+        Proof proof = Proof.builder().topic("no-features").build();
+        ProofTask task = new ProofTask(proof, new Configs(Map.of(), Map.of()), mock(ProofDriver.class));
+        try {
+            task.getLastVerifiedConsumerCheckpoint().mergeOutOfOrderSeqs(
+                    Map.of("key", List.of(org.apache.commons.lang3.tuple.Pair.of(1L, 1L))));
+            assertEquals(task.getSummary().outOfOrders(), 0);
+            assertTrue(task.getDetails().outOfOrderSeqs().isEmpty());
+        } finally {
+            task.getExecutor().shutdownNow();
+        }
+    }
+
+    @Test
     public void requestWatermarkExcludesVerifiedReplayFromPermanentEvidence() throws Exception {
         Proof proof = Proof.builder().id("proof").features(List.of("at_least_once", "ordering")).build();
         ProofTask task = new ProofTask(proof, new Configs(Map.of(), Map.of()), mock(ProofDriver.class));

@@ -870,7 +870,7 @@ public class ProofTask {
         return new ProofSummary(
                 verified,
                 countProducerErrors(this.getLastVerifiedProducerCheckpoint()),
-                proof.getFeatures().contains("ordering")
+                proof.getFeatures() != null && proof.getFeatures().contains("ordering")
                         ? lastVerifiedConsumerCheckpoint.getOutOfOrderSeqs().values().stream()
                                 .flatMap(ranges -> ranges.stream()
                                         .map(range -> range.getRight() - range.getLeft() + 1))
@@ -938,7 +938,8 @@ public class ProofTask {
                 checkpoints,
                 failedKeys,
                 lastVerifiedConsumerCheckpoint.getMissedSeqs(),
-                !sharedMode && proof.getFeatures().contains("ordering")
+                !sharedMode && proof.getFeatures() != null
+                        && proof.getFeatures().contains("ordering")
                         ? lastVerifiedConsumerCheckpoint.getOutOfOrderSeqs() : Map.of(),
                 lastVerifiedConsumerCheckpoint.getWriteDuplicatesSeqs());
     }
