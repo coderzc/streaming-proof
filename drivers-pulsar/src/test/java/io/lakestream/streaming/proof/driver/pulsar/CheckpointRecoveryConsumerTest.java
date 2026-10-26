@@ -63,7 +63,8 @@ public class CheckpointRecoveryConsumerTest {
         when(first.checkpoint()).thenReturn(Checkpoint.latest());
         try (CheckpointRecoveryConsumer recovery = new CheckpointRecoveryConsumer(factory, 1)) {
             recovery.messageProcessed();
-            expectThrows(UncheckedIOException.class, recovery::receive);
+            PulsarClientException error = expectThrows(PulsarClientException.class, recovery::receive);
+            assertEquals(error.getMessage(), "temporary restore failure");
             recovery.receive();
             ArgumentCaptor<Checkpoint> positions = ArgumentCaptor.forClass(Checkpoint.class);
             verify(factory, times(3)).create(positions.capture());

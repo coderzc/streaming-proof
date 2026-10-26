@@ -53,13 +53,15 @@ final class CheckpointRecoveryConsumer implements AutoCloseable {
                 pendingClose.close();
                 pendingClose = null;
             }
+            Checkpoint position;
             try {
                 // Deserialize on every retry; never fall back to earliest after a failed restore.
-                consumer = factory.create(Checkpoint.fromByteArray(savedCheckpoint));
-                log.info("Restored checkpoint consumer from serialized checkpoint ({} bytes)", savedCheckpoint.length);
+                position = Checkpoint.fromByteArray(savedCheckpoint);
             } catch (IOException e) {
                 throw new UncheckedIOException("Failed to deserialize saved checkpoint", e);
             }
+            consumer = factory.create(position);
+            log.info("Restored checkpoint consumer from serialized checkpoint ({} bytes)", savedCheckpoint.length);
         }
         return consumer.receive();
     }
