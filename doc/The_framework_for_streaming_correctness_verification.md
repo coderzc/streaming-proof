@@ -148,7 +148,7 @@ Instead of checking `getLastSeq(key) >= producerSeq` (which only confirms the hi
 **Summary reporting for Shared mode:**
 - `verified`: sum of `(highWatermark + 1)` across all keys (sequences are 0-based)
 - `duplicates`: detected via existing `SeqRange.duplicated` overlap counting
-- `missed`: internal gaps in merged ranges
+- `missed`: sequences up to the producer checkpoint under verification that are still not consumed once it timed out (or once the final wait is over). Gaps above it are messages still on their way to another consumer, so they are not counted
 - `outOfOrders`: always 0 (expected for Shared, not reported)
 
 **API example:**
@@ -332,7 +332,7 @@ The framework exposes REST APIs for control and monitoring.
                       "duplicated": 0 }]
           },
           "outOfOrderSeqs": {
-            "key3": [[150, 145]]
+            "key3": [{"145": 149}]
           },
           "writeDuplicatesSeqs": {
             "key4": [{ "start": { "seq": 200, "metadata": { "offset": 3000 } }, 
@@ -530,7 +530,7 @@ The framework exposes REST APIs for control and monitoring.
            },
            "outOfOrderSeqs": {
               "key0": [
-                 [1200, 1198]
+                 {"1198": 1199}
               ]
            }
         }
@@ -540,7 +540,7 @@ The framework exposes REST APIs for control and monitoring.
         - `consumed`: Map of sequence ranges for each key, with timestamps as inner keys
         - `missedSeqs`: Detected gaps in sequence numbers for each key
         - `duplicatedCount`: Count of duplicated messages per key
-        - `outOfOrderSeqs`: Pairs of sequence numbers received out of order
+        - `outOfOrderSeqs`: Inclusive sequence intervals with sequence/log-position inversions (see the README ordering scope)
 *   `POST /producers/stop/{id}`: Stop producer instances.
     *   **Path Parameter:** `id` (string) - The `proofId`.
 
@@ -568,7 +568,7 @@ The `ProofDetails` provides comprehensive information including:
 - `checkpoints`: Complete checkpoint information from all producers and consumers
 - `failedKeys`: Detailed mapping of failed keys and their associated sequence numbers
 - `missedSeqs`: Mapping of consumer identifiers to ranges of missed sequence numbers
-- `outOfOrderSeqs`: Mapping of consumer identifiers to pairs of out-of-order sequence numbers
+- `outOfOrderSeqs`: Mapping of message keys to inclusive sequence intervals with sequence/log-position inversions
 - `writeDuplicatesSeqs`: Mapping of producer identifiers to ranges of duplicate sequence numbers
 
 ### 7.3. Design Rationale

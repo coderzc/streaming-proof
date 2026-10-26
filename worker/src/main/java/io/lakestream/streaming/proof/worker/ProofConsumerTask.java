@@ -153,6 +153,9 @@ public class ProofConsumerTask implements MessageListener, AutoCloseable {
             log.info("[{}] Range gap detected | key: {} | new message: {} | last seq range: {}",
                     consumer.name(), key, newMsg, getLastSeq(key));
             newConsumedRange(key, newMsg);
+        } else if (!lastConsumedRange.canAppend(newMsg)) {
+            // Keep each range within one monotonic log-position span for coordinator analysis.
+            newConsumedRange(key, newMsg);
         } else {
             lastConsumedRange.setEnd(newMsg);
         }
@@ -288,7 +291,7 @@ public class ProofConsumerTask implements MessageListener, AutoCloseable {
             // Format the current timestamp as a readable date/time string
             String timestamp = java.time.format.DateTimeFormatter.ISO_LOCAL_DATE_TIME
                     .format(java.time.LocalDateTime.now());
-            v.put(timestamp, range);
+            ConsumerCheckPoint.putRange(v, timestamp, range);
             return v;
         });
     }
@@ -315,7 +318,7 @@ public class ProofConsumerTask implements MessageListener, AutoCloseable {
             // Format the current timestamp as a readable date/time string
             String timestamp = java.time.format.DateTimeFormatter.ISO_LOCAL_DATE_TIME
                    .format(java.time.LocalDateTime.now());
-            v.put(timestamp, range);
+            ConsumerCheckPoint.putRange(v, timestamp, range);
             return v;
         });
     }

@@ -16,6 +16,7 @@ package io.lakestream.streaming.proof.coordinator;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.testng.Assert.assertEquals;
+import static org.testng.Assert.assertNull;
 import static org.testng.Assert.expectThrows;
 
 import io.lakestream.streaming.proof.common.records.Configs;
@@ -25,6 +26,7 @@ import io.lakestream.streaming.proof.common.records.ProofReport;
 import io.lakestream.streaming.proof.common.records.PulsarProofConfig;
 import java.util.List;
 import java.util.Map;
+import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
 public class CoordinatorTest {
@@ -77,6 +79,37 @@ public class CoordinatorTest {
                 () -> coordinator.createProof(proof));
 
         assertEquals(error.getMessage(), "Final wait seconds must be 0 or greater.");
+    }
+
+    @DataProvider
+    public Object[][] nonPositiveProducerTotals() {
+        return new Object[][] {
+                {0, 16, 100, "Producers must be at least 1."},
+                {-1, 16, 100, "Producers must be at least 1."},
+                {3, 0, 100, "Keys must be at least 1."},
+                {3, -1, 100, "Keys must be at least 1."},
+                {3, 16, 0, "Message rate must be at least 1."},
+                {3, 16, -1, "Message rate must be at least 1."}
+        };
+    }
+
+    @Test(dataProvider = "nonPositiveProducerTotals")
+    public void testCreateProofRejectsNonPositiveProducerTotals(int producers, int keys, int msgRate, String message) {
+        Coordinator coordinator = new Coordinator();
+        coordinator.updateConfigs(new Configs(
+                Map.of(),
+                Map.of("test-driver", new Driver("kafka", Map.of(), null))));
+        Proof proof = Proof.builder()
+                .name("invalid-producer-totals")
+                .driver("test-driver")
+                .features(List.of("at_least_once"))
+                .topic("test-topic")
+                .producers(producers).keys(keys).msgRate(msgRate)
+                .build();
+
+        assertCreateProofRejected(coordinator, proof, message);
+        assertNull(proof.getId());
+        assertEquals(coordinator.listProofs(), List.of());
     }
 
     @Test
