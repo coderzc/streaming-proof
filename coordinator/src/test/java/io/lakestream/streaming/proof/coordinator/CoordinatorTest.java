@@ -164,6 +164,29 @@ public class CoordinatorTest {
         assertEquals(coordinator.listProofs(), List.of());
     }
 
+    @DataProvider
+    public Object[][] nonScalableRecoveryUris() {
+        return new Object[][] {
+                {"persistent://public/default/recovery"},
+                {"non-persistent://public/default/recovery"},
+                {"other://public/default/recovery"},
+                {"TOPIC://public/default/recovery"}
+        };
+    }
+
+    @Test(dataProvider = "nonScalableRecoveryUris")
+    public void rejectsExplicitNonScalableRecoveryUrisBeforeCreatingResources(String topic) {
+        Coordinator coordinator = new Coordinator();
+        coordinator.updateConfigs(new Configs(Map.of(), Map.of("pulsar", new Driver("pulsar", Map.of()))));
+        Proof proof = pulsarProof(PulsarProofConfig.builder().scalableTopicEnabled(true)
+                .consumerType("checkpoint").checkpointRestartMessages(20).build())
+                .topic(topic).consumers(1).build();
+        assertCreateProofRejected(coordinator, proof,
+                "Checkpoint recovery requires a topic:// URI or an unqualified topic name.");
+        assertNull(proof.getId());
+        assertEquals(coordinator.listProofs(), List.of());
+    }
+
     @Test
     public void rejectsDriverWideCheckpointRecovery() {
         Coordinator coordinator = new Coordinator();

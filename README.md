@@ -297,7 +297,9 @@ To exercise **checkpoint capture and restore**, submit a proof with `"consumers"
 ```
 
 The optional positive `checkpointRestartMessages` field belongs to this proof; the Coordinator rejects
-classic topics, other consumer types and multiple consumers. Driver-wide
+classic topics, other consumer types and multiple consumers. Explicit URIs must use `topic://`;
+`persistent://` and other schemes are rejected before creating resources. Omitted or short topic names
+are normalized to scalable topic names. Driver-wide
 `pulsar.checkpoint.restart.messages` settings are rejected to prevent readers from masking each other's gaps.
 Every 1000 processed messages the ungrouped reader captures and serializes its checkpoint, closes,
 deserializes the saved bytes, and recreates the reader at that position. Failed restores retry the saved

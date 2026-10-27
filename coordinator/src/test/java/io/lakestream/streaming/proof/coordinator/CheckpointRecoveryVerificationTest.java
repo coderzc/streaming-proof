@@ -43,9 +43,53 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import org.mockito.ArgumentCaptor;
+import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
 public class CheckpointRecoveryVerificationTest {
+    @DataProvider
+    public Object[][] validRecoveryTopics() {
+        return new Object[][] {
+                {"recovery", "topic://public/default/recovery"},
+                {"topic://public/default/recovery", "topic://public/default/recovery"}
+        };
+    }
+
+    @Test(dataProvider = "validRecoveryTopics")
+    public void acceptedRecoveryTopicsReachScalableAdminAndConsumerPaths(String topic, String expected)
+            throws Exception {
+        Proof proof = Proof.builder().id("routing").topic(topic).driver("pulsar").consumers(1)
+                .features(List.of("at_least_once"))
+                .pulsar(PulsarProofConfig.builder().scalableTopicEnabled(true).initialSegments(1)
+                        .consumerType("checkpoint").checkpointRestartMessages(20).build()).build();
+        Method validate = Coordinator.class.getDeclaredMethod("validateScalableTopicSettings", Proof.class);
+        validate.setAccessible(true);
+        validate.invoke(null, proof);
+        ProofDriver driver = mock(ProofDriver.class);
+        ProofTask task = new ProofTask(proof,
+                new Configs(Map.of(), Map.of("pulsar", new Driver("pulsar", Map.of()))), driver);
+        try {
+            task.createProofTopics();
+            verify(driver).createTopic(expected, 1, null);
+            WorkerHttpClient worker = mock(WorkerHttpClient.class);
+            when(worker.startConsumers(any())).thenReturn(CompletableFuture.completedFuture(null));
+            task.getClients().add(worker);
+            Method start = ProofTask.class.getDeclaredMethod("startConsumers");
+            start.setAccessible(true);
+            start.invoke(task);
+            ArgumentCaptor<NewConsumers> request = ArgumentCaptor.forClass(NewConsumers.class);
+            verify(worker).startConsumers(request.capture());
+            assertEquals(request.getValue().topic(), expected);
+            assertEquals(request.getValue().pulsarCheckpointRestartMessages(), Integer.valueOf(20));
+            Method routing = io.lakestream.streaming.proof.driver.pulsar.PulsarProofDriver.class
+                    .getDeclaredMethod("isScalableTopic", String.class);
+            routing.setAccessible(true);
+            assertEquals(routing.invoke(null, request.getValue().topic()), true);
+        } finally {
+            task.getExecutor().shutdownNow();
+        }
+    }
+
     @Test
     public void coordinatorForwardsRecoveryIntervalWithoutIncreasingTotalReaders() throws Exception {
         Proof proof = Proof.builder().id("forward").topic("topic://public/default/forward").driver("pulsar")

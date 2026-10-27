@@ -200,6 +200,11 @@ public class Coordinator {
                 throw new IllegalArgumentException(
                         "Checkpoint recovery requires a scalable topic, consumerType=checkpoint and consumers=1.");
             }
+            String topic = proof.getTopic();
+            if (topic != null && topic.contains("://") && !topic.startsWith("topic://")) {
+                throw new IllegalArgumentException(
+                        "Checkpoint recovery requires a topic:// URI or an unqualified topic name.");
+            }
         }
         if (!proof.isScalableTopic()) {
             if (pulsar != null && (pulsar.getInitialSegments() != null || pulsar.getConsumerType() != null)) {
