@@ -30,7 +30,7 @@ import com.fasterxml.jackson.annotation.JsonInclude;
  * @param checkpointSummary Compact checkpoint counts for the UI
  * @param performanceSummary Compact performance summary derived from live checkpoints
  * @param timeSeries Sampled history captured during checkpointing
- * @param completionTime Recorded completion time, or null while the run has not finished
+ * @param completionTime Time final verification completed; may be present while status is still {@code stopping}
  */
 @JsonInclude(JsonInclude.Include.NON_NULL)
 public record ProofReport(

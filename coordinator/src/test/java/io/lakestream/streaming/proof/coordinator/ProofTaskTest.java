@@ -660,6 +660,51 @@ public class ProofTaskTest {
     }
 
     @Test
+    public void testManualStopDuringDurationCompletionSkipsNotification() throws Exception {
+        ProofTask task = newSharedTask();
+        CountDownLatch verifying = new CountDownLatch(1);
+        CountDownLatch resumeVerification = new CountDownLatch(1);
+        CompletableFuture<Void> completion = null;
+        try {
+            getRunningFlag(task).set(true);
+            doAnswer(invocation -> {
+                verifying.countDown();
+                if (!resumeVerification.await(10, TimeUnit.SECONDS)) {
+                    throw new IllegalStateException("Timed out waiting to resume final verification");
+                }
+                return Pair.of(new ProducerCheckpoint(), new ConsumerCheckPoint());
+            }).when(task).aggregateCheckpoints();
+            Method complete = ProofTask.class.getDeclaredMethod("completeProofAfterDuration");
+            complete.setAccessible(true);
+            completion = CompletableFuture.runAsync(() -> {
+                try {
+                    complete.invoke(task);
+                } catch (ReflectiveOperationException e) {
+                    throw new RuntimeException(e);
+                }
+            });
+            assertTrue(verifying.await(10, TimeUnit.SECONDS));
+
+            task.requestStop();
+            resumeVerification.countDown();
+            completion.get(10, TimeUnit.SECONDS);
+
+            verify(task, never()).sendCompletionNotification(any());
+            assertEquals(task.getReport().status(), "stopped");
+            assertEquals(task.getReport().resultReason(), "The run was stopped manually.");
+        } finally {
+            resumeVerification.countDown();
+            try {
+                if (completion != null) {
+                    completion.get(10, TimeUnit.SECONDS);
+                }
+            } finally {
+                task.getExecutor().shutdownNow();
+            }
+        }
+    }
+
+    @Test
     public void testStartFailureMarksProofAsFailedInsteadOfRunning() {
         ProofDriver driver = mock(ProofDriver.class);
         Proof proof = Proof.builder()

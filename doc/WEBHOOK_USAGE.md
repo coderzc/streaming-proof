@@ -99,18 +99,19 @@ status and result reason, including failures caused by the verification stall li
 `Completion Time` is the report's recorded completion time, rather than the time the webhook is sent.
 
 ```
-🎯 **Streaming Proof Test Completed**
+Streaming Proof Test Completed
 
-**Proof ID:** test-12345
-**Name:** kafka-ordering-test
-**Driver:** kafka
-**Topic:** test-topic
-**Duration:** 3600 seconds
-**Start Time:** 2024-01-15T10:30:00
-**Completion Time:** 2024-01-15T11:30:00
+Proof ID: test-12345
+Name: kafka-ordering-test
+Driver: kafka
+Topic: test-topic
+Duration: 3600 seconds
+Start Time: 2024-01-15T10:30:00
+Completion Time: 2024-01-15T11:30:00
 
 Status: ✅ passed
 Reason: The run completed without missed or out-of-order messages.
+Verified: 1000
 ```
 
 ## API Examples
