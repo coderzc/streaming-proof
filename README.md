@@ -311,7 +311,7 @@ result. Ordinary grouped checkpoint proofs continue to allow at-least-once repla
 for the existing grouped behavior. Successful restores are logged by workers; this does not restart workers
 or persist checkpoints across worker-process failures.
 
-The pinned Pulsar 5.0.0 client has known sealed-segment checkpoint replay defects after splits/merges
+The Pulsar 5.0.0 client exhibited sealed-segment checkpoint replay defects after splits/merges
 (apache/pulsar#26837 and #26839). This mode must expose those defects as failures; it does not fix the client.
 
 The `offload.condition.*` settings apply to classic topics only. The broker splits and merges segments on its own

@@ -34,6 +34,7 @@ import io.lakestream.streaming.proof.common.records.ConsumerCheckPoint;
 import io.lakestream.streaming.proof.common.records.Driver;
 import io.lakestream.streaming.proof.common.records.NewConsumers;
 import io.lakestream.streaming.proof.common.records.Proof;
+import io.lakestream.streaming.proof.common.records.ProofReport;
 import io.lakestream.streaming.proof.common.records.PulsarProofConfig;
 import io.lakestream.streaming.proof.worker.ProofConsumers;
 import java.lang.reflect.Field;
@@ -163,6 +164,16 @@ public class CheckpointRecoveryVerificationTest {
             assertEquals(task.getReport().summary().duplicates(), 2L);
             assertEquals(task.getReport().status(), "failed");
             assertTrue(task.getReport().resultReason().contains("replayed"));
+            // Completion notifications must retain strict replay failures while cleanup is still running.
+            task.getRunning().set(true);
+            assertEquals(task.getReport().status(), "running");
+            Method buildReport = ProofTask.class.getDeclaredMethod("buildReport", boolean.class);
+            buildReport.setAccessible(true);
+            ProofReport finalReport =
+                    (ProofReport) buildReport.invoke(task, true);
+            assertEquals(finalReport.status(), "failed");
+            assertTrue(finalReport.resultReason().contains("replayed"));
+            task.getRunning().set(false);
             // Ordinary grouped checkpoints retain their at-least-once semantics.
             proof.getPulsar().setCheckpointRestartMessages(null);
             assertEquals(task.getReport().status(), "passed");
